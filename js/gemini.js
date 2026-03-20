@@ -76,10 +76,10 @@ const FALLBACK_MODEL_CHAIN = [
 // lines: 線分数 / gridN: 座標最大値(=グリッドサイズ-1) /
 // lo,hi: 許容交差数範囲 / hints: ヒント本数
 const LEVEL_CFG = {
-  0: { lines: 3, gridN: 3, lo: 0, hi: 6, hints: 2 }, // ← lines:4→3, hi:6(制約なし相当), hints:3→2
-  1: { lines: 4, gridN: 3, lo: 0, hi: 5, hints: 2 }, // ← hi:3→5
-  2: { lines: 4, gridN: 3, lo: 2, hi: 5, hints: 0 },
-  3: { lines: 5, gridN: 4, lo: 0, hi: 8, hints: 0 }
+  0: { lines: 3, gridN: 4, lo: 0, hi: 6, hints: 2 },
+  1: { lines: 4, gridN: 4, lo: 0, hi: 5, hints: 2 },
+  2: { lines: 4, gridN: 4, lo: 2, hi: 5, hints: 0 },
+  3: { lines: 5, gridN: 5, lo: 0, hi: 8, hints: 0 }
 };
 
 /* ====================================================================
