@@ -1,17 +1,6 @@
 /**
  * canvas.js
  * キャンバス描画・タッチ/マウス入力の管理
- *
- * 公開関数:
- *   initCanvases(problem)
- *   drawModel(problem)
- *   drawAnswer(problem)
- *   setupInteraction(problem, cb)
- *   getAnswerLines()
- *   undoLastLine()
- *   clearAnswerLines()
- *   drawWrongFeedback(problem, userLines)
- *   buildGridHeaders(problem)        ← 追加: ヘッダー DOM を構築
  */
 
 /* ============================================================
@@ -28,26 +17,21 @@ const CanvasState = {
 /* ============================================================
    定数
    ============================================================ */
-const DOT_RADIUS    = 5;
-const SNAP_RADIUS   = 0.4;
-const LINE_WIDTH    = 3;
-const MODEL_COLOR   = '#1A73E8';
-// ★ ヒント線を見本と同色の濃い青に変更
-const HINT_COLOR    = '#1A73E8';
-const USER_COLOR    = '#FF6B6B';
-// ★ 不正解フィードバック: 正解線を緑に変更
-const CORRECT_LINE_COLOR = '#22BB55';
-const DOT_COLOR     = '#AACCEE';
-const BG_COLOR      = '#F8FBFF';
+const DOT_RADIUS         = 5;
+const SNAP_RADIUS        = 0.4;
+const LINE_WIDTH         = 3;
+const MODEL_COLOR        = '#1A73E8';
+const HINT_COLOR         = '#1A73E8';   // 見本と同色の濃い青
+const USER_COLOR         = '#FF6B6B';
+const CORRECT_LINE_COLOR = '#22BB55';   // 不正解フィードバック: 正解線は緑
+const DOT_COLOR          = '#AACCEE';
+const BG_COLOR           = '#F8FBFF';
 
 /* ============================================================
    グリッドヘッダー用定数
    ============================================================ */
-// 行ヘッダー：動物絵文字（上から順、Lv1/Lv2は4行、Lv3は5行）
 const ROW_ANIMALS_4 = ['🐶', '🐱', '🐰', '🐻'];
 const ROW_ANIMALS_5 = ['🐶', '🐱', '🐰', '🐻', '🐼'];
-
-// 列ヘッダー：数字（左から順）
 const COL_NUMBERS_4 = ['１', '２', '３', '４'];
 const COL_NUMBERS_5 = ['１', '２', '３', '４', '５'];
 
@@ -57,73 +41,90 @@ const COL_NUMBERS_5 = ['１', '２', '３', '４', '５'];
    ============================================================ */
 function buildGridHeaders(problem) {
   const showHeader = problem.level <= 2;
-  const cols = problem.grid.cols;
-  const rows = problem.grid.rows;
-
-  const colAnimals = rows === 5 ? ROW_ANIMALS_5 : ROW_ANIMALS_4;
-  const colNumbers = cols === 5 ? COL_NUMBERS_5 : COL_NUMBERS_4;
+  const cols       = problem.grid.cols;
+  const rows       = problem.grid.rows;
+  const animals    = rows === 5 ? ROW_ANIMALS_5 : ROW_ANIMALS_4;
+  const numbers    = cols === 5 ? COL_NUMBERS_5 : COL_NUMBERS_4;
 
   ['model', 'answer'].forEach(side => {
-    const outerEl    = document.getElementById(`grid-outer-${side}`);
     const colHeaderEl = document.getElementById(`col-header-${side}`);
     const rowHeaderEl = document.getElementById(`row-header-${side}`);
-
-    if (!outerEl || !colHeaderEl || !rowHeaderEl) return;
+    if (!colHeaderEl || !rowHeaderEl) return;
 
     if (!showHeader) {
-      // Lv3: ヘッダーを非表示にし、canvas-wrap を直接表示
       colHeaderEl.style.display = 'none';
       rowHeaderEl.style.display = 'none';
       return;
     }
 
-    // ヘッダーを表示
     colHeaderEl.style.display = 'flex';
     rowHeaderEl.style.display = 'flex';
 
     // ---- 列ヘッダー（数字）を構築 ----
     colHeaderEl.innerHTML = '';
-    colNumbers.forEach(num => {
+    numbers.forEach(num => {
       const cell = document.createElement('div');
-      cell.className = 'col-header-cell';
+      cell.className   = 'col-header-cell';
       cell.textContent = num;
       colHeaderEl.appendChild(cell);
     });
 
     // ---- 行ヘッダー（動物）を構築 ----
     rowHeaderEl.innerHTML = '';
-    colAnimals.forEach(animal => {
+    animals.forEach(animal => {
       const cell = document.createElement('div');
-      cell.className = 'row-header-cell';
+      cell.className   = 'row-header-cell';
       cell.textContent = animal;
       rowHeaderEl.appendChild(cell);
     });
-
-    // ---- row-header の高さをキャンバスに同期 ----
-    // canvas-wrap の aspect-ratio:1/1 のため、幅 = 高さ
-    // 各 cell の高さをキャンバス幅 / rows で設定
-    syncRowHeaderHeight(side, rows);
   });
 }
 
-/**
- * 行ヘッダーの各セルの高さを canvas-wrap の実サイズに合わせる
- * ResizeObserver から再呼び出しされる
- */
+/* ============================================================
+   行ヘッダーの高さ・フォントを canvas-wrap の実サイズに同期
+   ★ JS のインラインスタイルで確実に反映させる
+   ============================================================ */
 function syncRowHeaderHeight(side, rows) {
   const wrap = document.querySelector(
-    side === 'model' ? '#grid-outer-model .canvas-wrap'
-                     : '#grid-outer-answer .canvas-wrap'
+    side === 'model'
+      ? '#grid-outer-model .canvas-wrap'
+      : '#grid-outer-answer .canvas-wrap'
   );
   const rowHeaderEl = document.getElementById(`row-header-${side}`);
   if (!wrap || !rowHeaderEl) return;
 
   const canvasSize = wrap.getBoundingClientRect().width || wrap.offsetWidth || 200;
-  const cellH = canvasSize / rows;
+  const cellH      = canvasSize / rows;
+
+  // ★ CSS変数 --header-size を読み取り、フォントサイズを比例計算
+  const headerSize = parseFloat(
+    getComputedStyle(document.documentElement).getPropertyValue('--header-size')
+  ) || 56;
 
   Array.from(rowHeaderEl.children).forEach(cell => {
-    cell.style.height = cellH + 'px';
-    cell.style.minHeight = cellH + 'px';
+    cell.style.height     = cellH + 'px';
+    cell.style.minHeight  = cellH + 'px';
+    cell.style.lineHeight = cellH + 'px';
+    // ★ headerSize を基準に絵文字サイズを決定（最小 16px）
+    cell.style.fontSize   = Math.max(Math.round(headerSize * 0.60), 16) + 'px';
+  });
+}
+
+/* ------------------------------------------------------------
+   列ヘッダーのフォントサイズも JS で同期する
+   ------------------------------------------------------------ */
+function syncColHeaderFontSize(side) {
+  const colHeaderEl = document.getElementById(`col-header-${side}`);
+  if (!colHeaderEl) return;
+
+  const headerSize = parseFloat(
+    getComputedStyle(document.documentElement).getPropertyValue('--header-size')
+  ) || 56;
+
+  Array.from(colHeaderEl.children).forEach(cell => {
+    // ★ headerSize を基準に数字サイズを決定（最小 12px）
+    cell.style.fontSize  = Math.max(Math.round(headerSize * 0.50), 12) + 'px';
+    cell.style.lineHeight = headerSize + 'px';
   });
 }
 
@@ -131,9 +132,6 @@ function syncRowHeaderHeight(side, rows) {
    ユーティリティ
    ============================================================ */
 
-/**
- * キャンバスを親要素のサイズに合わせてリサイズ（Retina 対応）
- */
 function resizeCanvas(canvas) {
   const wrap = canvas.parentElement;
   if (!wrap) return 300;
@@ -155,9 +153,6 @@ function resizeCanvas(canvas) {
   return size;
 }
 
-/**
- * グリッドのレイアウト情報を計算する
- */
 function calcGrid(size, grid) {
   const PAD   = size * 0.12;
   const inner = size - PAD * 2;
@@ -240,16 +235,27 @@ function drawEndpoints(ctx, g, lines, color, offsetX = 0, offsetY = 0) {
 function drawPreviewLine(ctx, g, fromDot, toPx) {
   const p1 = dotPos(g, fromDot.col, fromDot.row);
   ctx.save();
-  ctx.strokeStyle  = USER_COLOR;
-  ctx.lineWidth    = LINE_WIDTH;
-  ctx.lineCap      = 'round';
-  ctx.globalAlpha  = 0.6;
+  ctx.strokeStyle = USER_COLOR;
+  ctx.lineWidth   = LINE_WIDTH;
+  ctx.lineCap     = 'round';
+  ctx.globalAlpha = 0.6;
   ctx.setLineDash([6, 5]);
   ctx.beginPath();
   ctx.moveTo(p1.x, p1.y);
   ctx.lineTo(toPx.x, toPx.y);
   ctx.stroke();
   ctx.restore();
+}
+
+/* ============================================================
+   ヘッダー同期をまとめて呼ぶ内部ヘルパー
+   ============================================================ */
+function syncHeaders(problem) {
+  if (problem.level > 2) return;
+  ['model', 'answer'].forEach(side => {
+    syncRowHeaderHeight(side, problem.grid.rows);
+    syncColHeaderFontSize(side);
+  });
 }
 
 /* ============================================================
@@ -269,10 +275,7 @@ function drawModel(problem) {
   }
   drawEndpoints(ctx, g, problem.lines, MODEL_COLOR);
 
-  // ヘッダーセルの高さ同期
-  if (problem.level <= 2) {
-    syncRowHeaderHeight('model', problem.grid.rows);
-  }
+  syncHeaders(problem);
 }
 
 /* ============================================================
@@ -287,7 +290,7 @@ function drawAnswer(problem) {
   drawBackground(ctx, size);
   drawDots(ctx, g, problem.grid);
 
-  // ★ ヒント線: 見本と同色（HINT_COLOR = MODEL_COLOR = '#1A73E8'）
+  // ヒント線（見本と同色の濃い青）
   for (const line of (problem.hintLines || [])) {
     drawLine(ctx, g, line, HINT_COLOR, LINE_WIDTH + 1, false);
   }
@@ -299,10 +302,7 @@ function drawAnswer(problem) {
   }
   drawEndpoints(ctx, g, CanvasState.userLines, USER_COLOR);
 
-  // ヘッダーセルの高さ同期
-  if (problem.level <= 2) {
-    syncRowHeaderHeight('answer', problem.grid.rows);
-  }
+  syncHeaders(problem);
 }
 
 /* ============================================================
@@ -424,8 +424,6 @@ function clearAnswerLines() {
 
 /* ============================================================
    公開: 不正解フィードバック用キャンバス描画
-   ★ 正解線を緑で描画
-   ★ ユーザーの誤答線をオフセットして重なりを避ける
    ============================================================ */
 function drawWrongFeedback(problem, userLines) {
   const canvas = document.getElementById('canvas-wrong');
@@ -447,29 +445,25 @@ function drawWrongFeedback(problem, userLines) {
   ctx.scale(dpr, dpr);
 
   const g = calcGrid(W, problem.grid);
-
   drawBackground(ctx, W);
   drawDots(ctx, g, problem.grid);
 
-  // ★ ユーザーの誤答線: オフセット(+4px, +4px)をかけて正解線とずらす
-  //    薄いサーモンピンクで描画
-  const OFFSET_X = 4;
-  const OFFSET_Y = 4;
+  // ユーザーの誤答線（オフセットして正解線とずらす）
+  const OX = 4, OY = 4;
   for (const line of userLines) {
-    drawLine(ctx, g, line, '#FF9999', LINE_WIDTH, false, OFFSET_X, OFFSET_Y);
+    drawLine(ctx, g, line, '#FF9999', LINE_WIDTH, false, OX, OY);
   }
-  // 誤答線の端点もオフセット
   for (const line of userLines) {
     for (const pt of [{ x: line.x1, y: line.y1 }, { x: line.x2, y: line.y2 }]) {
       const p = dotPos(g, pt.x, pt.y);
       ctx.beginPath();
-      ctx.arc(p.x + OFFSET_X, p.y + OFFSET_Y, DOT_RADIUS, 0, Math.PI * 2);
+      ctx.arc(p.x + OX, p.y + OY, DOT_RADIUS, 0, Math.PI * 2);
       ctx.fillStyle = '#FF9999';
       ctx.fill();
     }
   }
 
-  // ★ 正解の線: 緑・太
+  // 正解の線（緑・太）
   for (const line of problem.lines) {
     drawLine(ctx, g, line, CORRECT_LINE_COLOR, LINE_WIDTH + 2, false);
   }
@@ -484,10 +478,6 @@ function setupResizeObserver() {
     if (!CanvasState.problem) return;
     drawModel(CanvasState.problem);
     drawAnswer(CanvasState.problem);
-    if (CanvasState.problem.level <= 2) {
-      syncRowHeaderHeight('model',  CanvasState.problem.grid.rows);
-      syncRowHeaderHeight('answer', CanvasState.problem.grid.rows);
-    }
   };
 
   if (window.ResizeObserver) {
