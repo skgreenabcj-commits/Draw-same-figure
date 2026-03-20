@@ -1,9 +1,15 @@
 'use strict';
 
 /* =====================================================================
-   gemini.js  v5.0
+   gemini.js  v5.1
    -----------------------------------------------------------------------
-   v5.0 からの変更点（v4.2 → v5.0）:
+   v5.1 からの変更点（v5.0 → v5.1）:
+     【整理】§8 削除に伴う不要定数・コメントのクリーンアップ
+       - PREFERRED_MODEL・FALLBACK_MODELS を §1 から削除
+       - ファイルヘッダーのレベル別制約を現仕様に修正
+       - v4.2 時代の機能説明（削除済み関数への言及）を除去
+
+   v5.0 の機能（維持）:
      【新機能】429レート制限時のモデルフォールバックチェーン
        - FALLBACK_MODEL_CHAIN を §1 に定数として定義
        - gemini-2.5-flash → gemini-2.5-flash-lite →
@@ -11,22 +17,13 @@
        - 1モデルあたりの429許容回数(MAX_429_PER_MODEL)を超えたら
          即座に次モデルへ移行し、無限ループを完全防止
        - 全モデル失敗時は _getFallback() へフォールオーバー
-       - _extractAndValidate() を内部ヘルパーとして切り出し、
-         generateProblems() の可読性を向上
+     【機能】responseMimeType 非対応モデル自動検出 + 7日キャッシュ
+     【機能】_callApi() 30秒 fetchタイムアウト
+     【機能】テキスト抽出パーサー（パターンA/B対応）
 
-   v4.2 の機能（維持）:
-     【Bug修正】_fetchAvailableModels() 8秒タイムアウト
-     【Bug修正】_callApi() 30秒 fetchタイムアウト
-     【Bug修正】429 無限ループ防止（MAX_RETRY_429）
-     【新機能】responseMimeType 非対応モデル自動検出 + 7日キャッシュ
-     【改善】テキスト抽出パーサーの強化
-       - パターンA（オブジェクトラッパー）自動アンラップ
-       - パターンB（改行区切り個別オブジェクト）検出
-     【既存機能】動的モデル選択（並列プローブ + 24時間キャッシュ）
-
-   レベル別制約:
-     Lv0: 交差0-2  (4本, 4×4グリッド, ヒント3本)
-     Lv1: 交差0-3  (4本, 4×4グリッド, ヒント2本)
+   レベル別制約（LEVEL_CFG 実装値と一致）:
+     Lv0: 制約なし (3本, 4×4グリッド, ヒント2本)
+     Lv1: 交差0-5  (4本, 4×4グリッド, ヒント2本)
      Lv2: 交差2-5  (4本, 4×4グリッド, ヒントなし)
      Lv3: 交差0-8  (5本, 5×5グリッド, ヒントなし)
 
@@ -50,19 +47,7 @@ const MODEL_CACHE_TTL = 24 * 60 * 60 * 1000;        // 24時間（ミリ秒）
 const NO_MIME_CACHE_KEY = 'gemini_no_mime_v1';
 const NO_MIME_CACHE_TTL = 7 * 24 * 60 * 60 * 1000;  // 7日間（ミリ秒）
 
-// ── resolveModel() 用優先モデル・フォールバックリスト ─────────────────
-const PREFERRED_MODEL = 'gemini-2.5-flash';
-const FALLBACK_MODELS = [
-  'gemini-2.5-flash',
-  'gemini-2.0-flash',
-  'gemini-2.0-flash-lite',
-  'gemini-1.5-flash',
-  'gemini-1.5-flash-8b',
-  'gemini-1.5-pro',
-  'gemini-1.0-pro'
-];
-
-// ── 429レート制限時のフォールバックチェーン（v5.0 新規追加）────────────
+// ── 429レート制限時のフォールバックチェーン ───────────────────────────
 // 各モデルの無料枠 RPD: gemini-2.5-flash=20, gemini-2.5-flash-lite=20,
 //                       gemini-3.1-flash-lite-preview=500
 // → RPD が最も大きい gemini-3.1-flash-lite-preview を最終砦に配置する。
