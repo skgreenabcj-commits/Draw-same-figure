@@ -538,6 +538,7 @@ const _FALLBACK = {
  * @param {number} count
  * @returns {Array}
  */
+// _getFallback の grid 生成を p.grid 優先に修正
 function _getFallback(level, count) {
   const pool = (
     typeof PROBLEM_BANK !== 'undefined' && PROBLEM_BANK[level]
@@ -545,17 +546,18 @@ function _getFallback(level, count) {
       : _FALLBACK[level] || _FALLBACK[1]
   ).slice();
 
-  // Fisher-Yates シャッフル
   for (let i = pool.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
     [pool[i], pool[j]] = [pool[j], pool[i]];
   }
 
   const cfg = LEVEL_CFG[level] ?? LEVEL_CFG[1];
+  // ★ p.grid が存在する場合はそちらを優先（PROBLEM_BANK の定義を尊重）
+  // p.grid がない（_FALLBACK 由来）場合のみ cfg.gridN+1 で補完
   return pool.slice(0, count).map(p => ({
     level,
-    grid:      { cols: cfg.gridN + 1, rows: cfg.gridN + 1 },
-    lines:     p.lines,
+    grid: p.grid ?? { cols: cfg.gridN + 1, rows: cfg.gridN + 1 },
+    lines: p.lines,
     hintLines: p.hintLines || p.lines.slice(0, cfg.hints)
   }));
 }
