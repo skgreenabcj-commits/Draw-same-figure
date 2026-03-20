@@ -415,138 +415,13 @@ function clearModelCache() {
 }
 
 /* ====================================================================
-   § 8. モデル解決（プローブ + キャッシュ）
+   § 8. モデル解決
+   --------------------------------------------------------------------
+   v5.0 以降、generateProblems() は resolveModel() を経由せず
+   FALLBACK_MODEL_CHAIN を直接走査するため、このセクションは削除済み。
+   旧実装（_probeModel / _fetchAvailableModels / resolveModel）は
+   RPM/RPD を事前プローブで消費する問題があったため廃止。
 ==================================================================== */
-
-/**
- * 指定モデルに 5 秒タイムアウトで疎通確認リクエストを送る。
- * 応答が HTTP 2xx なら true を返す。
- *
- * @param {string} model
- * @param {string} apiKey
- * @returns {Promise<boolean>}
- */
-async function _probeModel(model, apiKey) {
-  const ctrl = new AbortController();
-  const tid  = setTimeout(() => ctrl.abort(), 5000);
-  try {
-    const r = await fetch(
-      `${BASE_URL}/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`,
-      {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        signal:  ctrl.signal,
-        body:    JSON.stringify({
-          contents:         [{ parts: [{ text: 'Reply with the single word: ready' }] }],
-          generationConfig: { maxOutputTokens: 10 }
-        })
-      }
-    );
-    clearTimeout(tid);
-    return r.ok;
-  } catch (e) {
-    clearTimeout(tid);
-    return false;
-  }
-}
-
-/**
- * Gemini API の /models エンドポイントから generateContent 対応モデル一覧を取得する。
- * AbortController で 8 秒タイムアウトを設定。タイムアウト・エラー時は null を返す。
- *
- * @param {string} apiKey
- * @returns {Promise<string[]|null>}
- */
-async function _fetchAvailableModels(apiKey) {
-  const ctrl = new AbortController();
-  const tid  = setTimeout(() => ctrl.abort(), 8000);
-  try {
-    const r = await fetch(
-      `${BASE_URL}/models?key=${encodeURIComponent(apiKey)}`,
-      { signal: ctrl.signal }
-    );
-    clearTimeout(tid);
-    if (!r.ok) return null;
-    const data = await r.json();
-    return (data.models || [])
-      .filter(m =>
-        (m.supportedGenerationMethods || []).includes('generateContent')
-      )
-      .map(m => m.name.replace('models/', ''));
-  } catch (_) {
-    clearTimeout(tid);
-    console.warn(
-      '[gemini] モデル一覧の取得がタイムアウトまたは失敗しました。' +
-      'フォールバックリストを使用します。'
-    );
-    return null;
-  }
-}
-
-/**
- * 最適なモデルを以下の優先順位で解決する:
- *   1. localStorage キャッシュにヒットすればそれを返す（24時間有効）
- *   2. PREFERRED_MODEL をプローブ → 成功すれば採用
- *   3. API からモデル一覧を取得して既知リストと照合（8秒タイムアウト付き）
- *   4. 上位 3 モデルを並列プローブ → 最速で成功したものを採用
- *   5. 残りを直列プローブ
- *   6. 全滅した場合は 'gemini-2.5-flash' をデフォルトとして返す
- *
- * @param {string} apiKey
- * @returns {Promise<string>}
- */
-async function resolveModel(apiKey) {
-  const cached = _loadCachedModel();
-  if (cached) {
-    console.log(`[gemini] キャッシュ済みモデルを使用: ${cached}`);
-    return cached;
-  }
-
-  console.log(`[gemini] 優先モデルを確認中: ${PREFERRED_MODEL}`);
-  if (await _probeModel(PREFERRED_MODEL, apiKey)) {
-    console.log(`[gemini] 優先モデルを選択: ${PREFERRED_MODEL}`);
-    _saveModel(PREFERRED_MODEL);
-    return PREFERRED_MODEL;
-  }
-
-  const available  = await _fetchAvailableModels(apiKey);
-  let   candidates = FALLBACK_MODELS.slice();
-  if (available) {
-    const apiSet = new Set(available);
-    const known  = candidates.filter(m => apiSet.has(m));
-    const extra  = available.filter(
-      m => !candidates.includes(m) && m.startsWith('gemini')
-    );
-    candidates = [...known, ...extra];
-    console.log(
-      `[gemini] API取得候補: ${candidates.slice(0, 5).join(', ')}…`
-    );
-  }
-
-  const top3   = candidates.slice(0, 3);
-  const rest   = candidates.slice(3);
-  const top3Ok = await Promise.all(top3.map(m => _probeModel(m, apiKey)));
-  for (let i = 0; i < top3.length; i++) {
-    if (top3Ok[i]) {
-      console.log(`[gemini] 並列プローブで選択: ${top3[i]}`);
-      _saveModel(top3[i]);
-      return top3[i];
-    }
-  }
-  for (const m of rest) {
-    if (await _probeModel(m, apiKey)) {
-      console.log(`[gemini] 直列プローブで選択: ${m}`);
-      _saveModel(m);
-      return m;
-    }
-  }
-
-  console.warn(
-    '[gemini] 使用可能なモデルが見つかりません。' +
-    `${FALLBACK_MODEL_CHAIN[0]} をデフォルト使用`
-  );
-  return FALLBACK_MODEL_CHAIN[0];
-}
 
 /* ====================================================================
    § 9. プロンプト生成
@@ -972,7 +847,6 @@ function loadApiKey() {
 
 return {
   generateProblems,
-  resolveModel,
   saveApiKey,
   loadApiKey,
   clearModelCache
@@ -981,4 +855,4 @@ return {
 })(); // end _G IIFE
 
 // ── グローバル公開（index.html から直接参照できるようにする）────────
-const { generateProblems, resolveModel, saveApiKey, loadApiKey, clearModelCache } = _G;
+const { generateProblems, saveApiKey, loadApiKey, clearModelCache } = _G;
