@@ -20,8 +20,8 @@
   --radius:    16px;
   --font:      'M PLUS Rounded 1c', 'Kosugi Maru', sans-serif;
 
-  /* グリッドヘッダーサイズ */
-  --header-size: 28px;
+  /* ★ グリッドヘッダーサイズ: 2倍に拡大 */
+  --header-size: 56px;
 }
 
 html {
@@ -79,26 +79,28 @@ button:active { transform: scale(.95); }
   transform: translateY(-2px);
 }
 
-/* ★ ボタン1.5倍: action-row 内の btn-primary / btn-sub */
+/* ===== action-row ボタン: 1.5倍サイズ ===== */
 .btn-primary {
-  padding: 18px 54px;          /* 12px 36px → 1.5倍 */
-  font-size: 1.65rem;          /* 1.1rem → 1.5倍 */
+  padding: 18px 54px;
+  font-size: 1.65rem;
   font-weight: 700;
   color: #fff;
   background: linear-gradient(135deg, var(--primary), var(--primary2));
   border-radius: 50px;
   box-shadow: 0 4px 12px rgba(255,107,107,.4);
+  white-space: nowrap;           /* ★ 折り返し禁止 */
 }
 .btn-primary:hover { transform: translateY(-1px); }
 
 .btn-sub {
-  padding: 15px 36px;          /* 10px 24px → 1.5倍 */
-  font-size: 1.5rem;           /* 1rem → 1.5倍 */
+  padding: 15px 36px;
+  font-size: 1.5rem;
   font-weight: 700;
   color: var(--text-main);
   background: #EEF3FB;
   border-radius: 50px;
   box-shadow: 0 2px 8px rgba(0,0,0,.08);
+  white-space: nowrap;           /* ★ 折り返し禁止 */
 }
 .btn-sub:hover { background: #DDE8F5; }
 
@@ -283,7 +285,7 @@ button:active { transform: scale(.95); }
 
 .game-main {
   width: 100%;
-  max-width: 900px;
+  max-width: 1000px;           /* ★ ヘッダー拡大分に対応して少し広げる */
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -294,7 +296,7 @@ button:active { transform: scale(.95); }
 
 .problem-row {
   display: flex;
-  gap: 16px;
+  gap: 24px;                   /* ★ パネル間余白を少し広げる */
   width: 100%;
   justify-content: center;
 }
@@ -320,14 +322,12 @@ button:active { transform: scale(.95); }
   display: flex;
   flex-direction: column;
   width: 100%;
-  /* canvas-wrap の max-width に合わせて中央寄せ */
   align-items: flex-start;
 }
 
 /* 列ヘッダー（数字）横一列 */
 .col-header {
   display: flex;
-  /* 左側の行ヘッダー幅分のオフセット */
   padding-left: var(--header-size);
   width: 100%;
   margin-bottom: 2px;
@@ -336,11 +336,11 @@ button:active { transform: scale(.95); }
 .col-header-cell {
   flex: 1;
   text-align: center;
-  font-size: .75rem;
+  /* ★ フォントサイズを2倍に拡大 */
+  font-size: 1.4rem;
   font-weight: 800;
   color: #5588CC;
   line-height: var(--header-size);
-  /* グリッド点と位置を合わせるため両端に補正 */
 }
 
 /* grid-body: 行ヘッダー + キャンバスを横並び */
@@ -364,12 +364,12 @@ button:active { transform: scale(.95); }
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: .9rem;
+  /* ★ 絵文字サイズを2倍に拡大 */
+  font-size: 1.8rem;
   line-height: 1;
-  /* キャンバスの aspect-ratio に合わせて高さを揃える */
 }
 
-/* canvas-wrap はそのまま flex:1 で残りを占有 */
+/* canvas-wrap */
 .canvas-wrap {
   position: relative;
   background: var(--panel-bg);
@@ -395,7 +395,7 @@ button:active { transform: scale(.95); }
 
 /* ヒントメッセージ */
 .hint-msg {
-  font-size: 1.2rem;           /* 少し大きく */
+  font-size: 1.2rem;
   font-weight: 700;
   color: #1A73E8;
   background: #EAF2FF;
@@ -409,20 +409,22 @@ button:active { transform: scale(.95); }
   display: flex;
   gap: 16px;
   align-items: center;
-  flex-wrap: wrap;
+  /* ★ flex-wrap をやめて横1行に固定 → 見切れ防止 */
+  flex-wrap: nowrap;
   justify-content: center;
   width: 100%;
   padding: 0 8px;
 }
 
-/* action-row 内ボタン: 1.5倍サイズを維持しつつ折り返し対応 */
+/*
+ * ★ action-row 内ボタン
+ *    max-width 制限を撤廃し、テキストが収まるサイズを保証
+ *    flex-shrink:0 で縮まないようにする
+ */
 .action-row .btn-sub,
 .action-row .btn-primary {
-  flex: 1 1 auto;
-  min-width: 120px;            /* 80px → 120px */
-  max-width: 240px;            /* 160px → 240px */
-  text-align: center;
-  white-space: nowrap;
+  flex: 0 0 auto;              /* ★ shrink/grow させない */
+  white-space: nowrap;         /* ★ テキスト折り返し禁止 */
 }
 
 /* ===== FEEDBACK OVERLAY ===== */
@@ -571,8 +573,13 @@ button:active { transform: scale(.95); }
 
 /* ===== Responsive — タブレット (601px〜900px) ===== */
 @media (min-width: 601px) and (max-width: 900px) {
-  .problem-row { gap: 12px; }
-  --header-size: 24px;
+  :root { --header-size: 44px; }
+  .col-header-cell { font-size: 1.1rem; }
+  .row-header-cell { font-size: 1.4rem; }
+  .problem-row { gap: 16px; }
+  /* タブレットでもボタンが1行に収まるよう調整 */
+  .action-row .btn-sub    { font-size: 1.25rem; padding: 13px 24px; }
+  .action-row .btn-primary { font-size: 1.35rem; padding: 15px 32px; }
 }
 
 /* ===== Responsive — スマートフォン (〜600px) ===== */
@@ -592,7 +599,7 @@ button:active { transform: scale(.95); }
   }
   .panel {
     width: 100%;
-    max-width: 360px;
+    max-width: 380px;
   }
 
   /* ヘッダー */
@@ -603,10 +610,18 @@ button:active { transform: scale(.95); }
   /* メイン余白 */
   .game-main { padding: 8px 8px 24px; gap: 10px; }
 
-  /* アクションボタン: スマホでも1.5倍維持 */
-  .action-row { gap: 8px; }
-  .action-row .btn-sub    { font-size: 1.2rem; padding: 12px 20px; }
-  .action-row .btn-primary { font-size: 1.3rem; padding: 14px 28px; }
+  /* グリッドヘッダー: スマホでは少し縮める */
+  :root { --header-size: 36px; }
+  .col-header-cell { font-size: .95rem; }
+  .row-header-cell { font-size: 1.3rem; }
+
+  /* アクションボタン: スマホでは少し縮めつつ1行維持 */
+  .action-row {
+    gap: 6px;
+    padding: 0 4px;
+  }
+  .action-row .btn-sub    { font-size: 1rem;  padding: 10px 14px; }
+  .action-row .btn-primary { font-size: 1.05rem; padding: 11px 18px; }
 
   /* フィードバック */
   #canvas-wrong { max-width: 220px; }
@@ -618,17 +633,14 @@ button:active { transform: scale(.95); }
   .result-cat { width: 110px; height: 110px; }
   .result-title { font-size: 1.5rem; }
   .result-score { font-size: 2.4rem; }
-
-  /* グリッドヘッダー小さく */
-  :root { --header-size: 22px; }
-  .col-header-cell { font-size: .65rem; }
-  .row-header-cell { font-size: .75rem; }
 }
 
 /* ===== 極小画面 (〜360px) ===== */
 @media (max-width: 360px) {
   .start-title { font-size: 1.3rem; }
-  .action-row .btn-sub    { font-size: 1rem; padding: 10px 14px; }
-  .action-row .btn-primary { font-size: 1.1rem; padding: 12px 20px; }
-  :root { --header-size: 20px; }
+  :root { --header-size: 28px; }
+  .col-header-cell { font-size: .75rem; }
+  .row-header-cell { font-size: 1.1rem; }
+  .action-row .btn-sub    { font-size: .85rem; padding: 8px 10px; }
+  .action-row .btn-primary { font-size: .9rem;  padding: 9px 12px; }
 }
