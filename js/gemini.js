@@ -809,16 +809,21 @@ function _extractAndValidate(result, level, count, cfg) {
 }
 
 /* ====================================================================
-   § 13. 問題生成メイン（公開 API）
+   § 13. 問題生成メイン（公開 API）  ← §13 全体をこれで差し替え
 ==================================================================== */
 
 /**
  * 指定レベルの問題を count 件生成して返す。
  *
- * フォールバックチェーン（v5.0 追加）:
- *   FALLBACK_MODEL_CHAIN を順番に試みる。
- *   各モデルで 429 が MAX_429_PER_MODEL 回を超えたら次モデルへ移行。
- *   全モデル失敗時は _getFallback() でローカルBANKを返す。
+ * FALLBACK_MODEL_CHAIN を先頭から順に走査する。
+ * resolveModel() は呼ばない（プローブによるRPM消費を防ぐため）。
+ *
+ * 各モデルの試行ルール:
+ *   - MAX_ATTEMPTS_PER_MODEL 回の生成試行を行う。
+ *   - 429 が MAX_429_PER_MODEL 回に達したら即座に次モデルへ。
+ *   - 401/403 は認証エラーのため全体を即座に中断してフォールバック。
+ *   - 408/0 はタイムアウト/ネットワークエラーのため次試行へ。
+ * 全モデル失敗時は _getFallback() でローカルBANKを返す。
  *
  * @param {number} level
  * @param {number} count
@@ -835,16 +840,18 @@ async function generateProblems(level, count, apiKey) {
   const prompt = _buildPrompt(level, count);
 
   const MAX_ATTEMPTS_PER_MODEL = 5;  // 1モデルあたりの最大生成試行数
-  const MAX_429_PER_MODEL      = 1;  // 1モデルあたりの429許容回数
+  const MAX_429_PER_MODEL      = 3;  // 1モデルあたりの429許容回数
+                                     // （1回バックオフ→2回目バックオフ→3回目でbreak）
 
-  // ── モデルチェーンを順番に試みる ──────────────────────────────────
+  // ── FALLBACK_MODEL_CHAIN を先頭から順に走査 ───────────────────────
+  // resolveModel() は呼ばない。チェーンの先頭が常にプライマリモデル。
   for (let mi = 0; mi < FALLBACK_MODEL_CHAIN.length; mi++) {
-    const model = FALLBACK_MODEL_CHAIN[mi];
+    const model    = FALLBACK_MODEL_CHAIN[mi];
     let attempt429 = 0;
 
     console.log(
-      `[gemini] モデルチェーン[${mi}]: ${model} を使用 ` +
-      `(レベル:${level} / 要求:${count}件)`
+      `[gemini] チェーン[${mi}] ${model} を試行開始 ` +
+      `(Lv${level} / 要求${count}件)`
     );
 
     for (let attempt = 0; attempt < MAX_ATTEMPTS_PER_MODEL; attempt++) {
@@ -860,24 +867,23 @@ async function generateProblems(level, count, apiKey) {
         attempt429++;
         if (attempt429 >= MAX_429_PER_MODEL) {
           console.warn(
-            `[gemini] ${model}: 429 上限(${MAX_429_PER_MODEL}回)到達 ` +
-            `→ 次モデルへ`
+            `[gemini] ${model}: 429 上限(${MAX_429_PER_MODEL}回)到達 → 次モデルへ`
           );
           break; // 内側ループを抜けて次モデルへ
         }
-        // 指数バックオフ（2s → 4s, jitter付き, 最大15s）
+        // 指数バックオフ（2s → 4s → 8s、jitter付き、最大15s）
         const backoff = Math.min(2000 * Math.pow(2, attempt429 - 1), 15000);
         const wait    = backoff + Math.random() * 1000;
         console.warn(
-          `[gemini] 429 backoff: ${Math.round(wait)}ms (${model} ` +
-          `${attempt429}/${MAX_429_PER_MODEL}回目)`
+          `[gemini] 429 backoff ${Math.round(wait)}ms ` +
+          `(${model} ${attempt429}/${MAX_429_PER_MODEL}回目)`
         );
         await new Promise(r => setTimeout(r, wait));
-        attempt--; // 試行カウントを消費しない
+        attempt--; // 試行カウントを消費しない（for の attempt++ と相殺）
         continue;
       }
 
-      // ── 401 / 403: 認証エラー → 即座にフォールバックへ ──────────
+      // ── 401 / 403: 認証エラー → 全体を即中断してフォールバック ─────
       if (status === 401 || status === 403) {
         console.error(
           `[gemini] 認証エラー (HTTP ${status}) → フォールバックBANKへ`
@@ -889,8 +895,7 @@ async function generateProblems(level, count, apiKey) {
       // ── 408 / 0: タイムアウト / ネットワークエラー ───────────────
       if (status === 408 || status === 0) {
         console.warn(
-          `[gemini] タイムアウト/ネットワークエラー ` +
-          `(${model} 試行${attempt + 1}) → 次試行へ`
+          `[gemini] タイムアウト/NWエラー (${model} 試行${attempt + 1}) → 次試行へ`
         );
         continue;
       }
@@ -899,22 +904,21 @@ async function generateProblems(level, count, apiKey) {
       const problems = _extractAndValidate(result, level, count, cfg);
       if (problems) {
         console.log(
-          `[gemini] 問題生成成功: ${model} ` +
-          `(試行${attempt + 1}/${MAX_ATTEMPTS_PER_MODEL})`
+          `[gemini] 問題生成成功: ${model} (試行${attempt + 1}/${MAX_ATTEMPTS_PER_MODEL})`
         );
         return problems;
       }
 
       console.warn(
-        `[gemini] パース/バリデーション失敗 ` +
-        `(${model} 試行${attempt + 1}) → 次試行へ`
+        `[gemini] パース/バリデーション失敗 (${model} 試行${attempt + 1}) → 次試行へ`
       );
 
     } // end inner for (attempt)
 
+    const nextModel = FALLBACK_MODEL_CHAIN[mi + 1];
     console.warn(
-      `[gemini] ${model}: 全試行失敗 ` +
-      `→ チェーン[${mi + 1}]${FALLBACK_MODEL_CHAIN[mi + 1] ? ` (${FALLBACK_MODEL_CHAIN[mi + 1]})` : ' (なし)'} へ`
+      `[gemini] ${model}: 全試行失敗 → ` +
+      (nextModel ? `次モデル: ${nextModel}` : 'フォールバックBANKへ')
     );
 
   } // end outer for (mi)
@@ -923,6 +927,7 @@ async function generateProblems(level, count, apiKey) {
   console.warn('[gemini] 全モデル失敗 → _getFallback() を使用します');
   return _getFallback(level, count);
 }
+
 
 /* ====================================================================
    § 14. APIキー管理（公開 API）
