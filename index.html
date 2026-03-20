@@ -71,33 +71,48 @@
     <!-- 問題本体 -->
     <main class="game-main">
       <div class="problem-row">
+
         <!-- 左：模範図 -->
         <div class="panel">
-          <p class="panel-label">見本</p>
-          <div class="canvas-wrap">
-            <canvas id="canvas-model"></canvas>
+          <p class="panel-label">みほん</p>
+          <!-- グリッドヘッダー付きラッパー -->
+          <div class="grid-outer" id="grid-outer-model">
+            <div class="col-header" id="col-header-model"></div>
+            <div class="grid-body">
+              <div class="row-header" id="row-header-model"></div>
+              <div class="canvas-wrap">
+                <canvas id="canvas-model"></canvas>
+              </div>
+            </div>
           </div>
         </div>
 
         <!-- 右：回答欄 -->
         <div class="panel">
           <p class="panel-label">かいてみよう</p>
-          <div class="canvas-wrap" id="answer-wrap">
-            <canvas id="canvas-answer"></canvas>
-            <!-- タッチ用オーバーレイ -->
-            <canvas id="canvas-overlay"></canvas>
+          <!-- グリッドヘッダー付きラッパー -->
+          <div class="grid-outer" id="grid-outer-answer">
+            <div class="col-header" id="col-header-answer"></div>
+            <div class="grid-body">
+              <div class="row-header" id="row-header-answer"></div>
+              <div class="canvas-wrap" id="answer-wrap">
+                <canvas id="canvas-answer"></canvas>
+                <canvas id="canvas-overlay"></canvas>
+              </div>
+            </div>
           </div>
         </div>
+
       </div>
 
       <!-- ヒントメッセージ（Level1用） -->
-      <p id="hint-msg" class="hint-msg hidden">のこり <span id="hint-remain"></span> ほんの線をかこう！</p>
+      <p id="hint-msg" class="hint-msg hidden">のこり<span id="hint-remain"></span>ほんのせんをかこう！</p>
 
       <!-- ボタン行 -->
       <div class="action-row">
-        <button id="btn-clear" class="btn-sub"><i class="fa fa-eraser"></i> けす</button>
+        <button id="btn-clear" class="btn-sub"><i class="fa fa-eraser"></i> ぜんぶけす</button>
         <button id="btn-check" class="btn-primary"><i class="fa fa-check"></i> こたえあわせ</button>
-        <button id="btn-undo" class="btn-sub"><i class="fa fa-undo"></i> もどす</button>
+        <button id="btn-undo" class="btn-sub"><i class="fa fa-undo"></i> １つもどす</button>
       </div>
     </main>
 
@@ -106,7 +121,7 @@
       <div id="feedback-box" class="feedback-box">
         <div id="feedback-wrong" class="hidden">
           <p class="fb-title wrong">もう すこし！</p>
-          <p class="fb-desc">あかい線が ただしい せんだよ</p>
+          <p class="fb-desc">みどりせんが　ただしい　せんだよ</p>
           <canvas id="canvas-wrong"></canvas>
           <button id="btn-next-wrong" class="btn-primary mt16">つぎへ <i class="fa fa-arrow-right"></i></button>
         </div>
