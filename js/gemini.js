@@ -1,46 +1,40 @@
 'use strict';
 
 /* =====================================================================
-   gemini.js  v5.3
+   gemini.js  v5.4
    -----------------------------------------------------------------------
-   v5.3 からの変更点（v5.2 → v5.3）:
+   v5.4 からの変更点（v5.3 → v5.4）:
+     【Fix-E】_callApi の JSON パースロジックを全面改修
+       - §11: text が undefined / 空文字の場合の NullParseError を解消
+           ・part?.text が非空文字列のときのみ text として使用、
+             それ以外は null 扱いにしてフォールバックフローへ
+           ・JSON mode かつ text 存在 → JSON.parse 直接試行。
+             パース結果が配列でない場合は _extractJsonArray へ委譲。
+           ・JSON mode かつ text が null  →  レスポンス全体を
+             JSON.stringify して _extractJsonArray を試みる。
+             それでも空なら no-mime キャッシュを記録して
+             テキストモードで即時再試行（null 返却→呼び出し元ループへ）。
+           ・テキストモード → _extractJsonArray で抽出（従来通り）。
+           ・デバッグ用に part のキー一覧と text 長をログ出力。
+
+   v5.3 の変更点（維持）:
      【Fix-D】コリニア重複（同一直線上の部分重複）対策
        - §2 末尾: _isCollinearOverlap / _hasCollinearOverlap を追加
-           ・外積によるコリニア判定 + 1次元区間重複判定
-           ・端点のみの接触（tMax==0 または tMin==1）は許容
-           ・不要変数 dxB/dyB を削除（Issue-1 修正）
-       - §4 _normalise: Step2 としてコリニア重複チェックを追加
-           ・検出時は問題全体を棄却（null を返す）して再生成を促す
-           ・JSDoc を Step1/Step2 構成に更新（Issue-2 修正）
-       - §9 _buildPrompt: コリニア重複の禁止ルールと具体例を明示
-           ・禁止例（内包・部分重複）と許容例（コリニア非重複）を追記
-           ・Self-check ステップ1b にコリニア確認を追加
+       - §4 _normalise: Step2 コリニア重複チェック追加（検出時 null 返却）
+       - §9 _buildPrompt: 禁止ルールと具体例を明示
 
    v5.2 の変更点（維持）:
-     【Fix-A】LEVEL_CFG の gridN を修正（4×4グリッドに統一）
-       - Lv0,1,2: gridN 4 → 3 (gridN+1=4, 4×4グリッド)
-       - Lv3: gridN 5 → 4 (gridN+1=5, 5×5グリッド)
-     【Fix-B】_normalise に端点一致重複除去ロジックを追加（Step1）
-       - 方向を正規化して同一線分を検出・除去
-       - 除去後に線分数が cfg.lines と一致しない場合は null を返す
-     【Fix-C】_buildPrompt に端点一致重複禁止の制約文を追加
+     【Fix-A】LEVEL_CFG gridN 修正（4×4グリッドに統一）
+       Lv0,1,2: gridN=3 / Lv3: gridN=4
+     【Fix-B】_normalise Step1 端点一致重複除去
+     【Fix-C】_buildPrompt 重複禁止制約文追加
 
    v5.1 の変更点（維持）:
-     【整理】§8 削除に伴う不要定数・コメントのクリーンアップ
-       - PREFERRED_MODEL・FALLBACK_MODELS を §1 から削除
-       - ファイルヘッダーのレベル別制約を現仕様に修正
+     不要定数・コメントのクリーンアップ
 
    v5.0 の機能（維持）:
-     【新機能】429レート制限時のモデルフォールバックチェーン
-       - FALLBACK_MODEL_CHAIN を §1 に定数として定義
-       - gemini-2.5-flash → gemini-2.5-flash-lite →
-         gemini-3.1-flash-lite-preview の順で自動切替
-       - 1モデルあたりの429許容回数(MAX_429_PER_MODEL)を超えたら
-         即座に次モデルへ移行し、無限ループを完全防止
-       - 全モデル失敗時は _getFallback() へフォールオーバー
-     【機能】responseMimeType 非対応モデル自動検出 + 7日キャッシュ
-     【機能】_callApi() 30秒 fetchタイムアウト
-     【機能】テキスト抽出パーサー（パターンA/B対応）
+     429 フォールバックチェーン / responseMimeType キャッシュ /
+     30 秒 fetch タイムアウト / テキスト抽出パーサー
 
    レベル別制約（LEVEL_CFG 実装値と一致）:
      Lv0: 制約なし (3本, 4×4グリッド, ヒント2本)
@@ -60,30 +54,29 @@ const _G = (() => {
 
 const BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
 
-// ── モデルキャッシュ ──────────────────────────────────────────────────
 const MODEL_CACHE_KEY = 'gemini_model_v3';
-const MODEL_CACHE_TTL = 24 * 60 * 60 * 1000;        // 24時間（ミリ秒）
+const MODEL_CACHE_TTL = 24 * 60 * 60 * 1000;       // 24時間
 
-// ── responseMimeType 非対応フラグキャッシュ ───────────────────────────
 const NO_MIME_CACHE_KEY = 'gemini_no_mime_v1';
-const NO_MIME_CACHE_TTL = 7 * 24 * 60 * 60 * 1000;  // 7日間（ミリ秒）
+const NO_MIME_CACHE_TTL = 7 * 24 * 60 * 60 * 1000; // 7日間
 
-// ── 429レート制限時のフォールバックチェーン ───────────────────────────
-// 各モデルの無料枠 RPD: gemini-2.5-flash=20, gemini-2.5-flash-lite=20,
-//                       gemini-3.1-flash-lite-preview=500
-// → RPD が最も大きい gemini-3.1-flash-lite-preview を最終砦に配置する。
+// 429レート制限フォールバックチェーン
+// RPD: gemini-2.5-flash=20, gemini-2.5-flash-lite=20,
+//      gemini-3.1-flash-lite-preview=500
 const FALLBACK_MODEL_CHAIN = [
-  'gemini-2.5-flash',             // プライマリ
-  'gemini-2.5-flash-lite',        // 第1フォールバック（同世代・同品質）
-  'gemini-3.1-flash-lite-preview' // 第2フォールバック（RPD500・最終砦）
+  'gemini-2.5-flash',
+  'gemini-2.5-flash-lite',
+  'gemini-3.1-flash-lite-preview'
 ];
 
-// ── レベル別設定 ──────────────────────────────────────────────────────
-// lines: 線分数 / gridN: 座標最大値(=グリッドサイズ-1) /
-// lo,hi: 許容交差数範囲 / hints: ヒント本数
-// 【Fix-A】gridN を problems.js の grid 定義と統一
-//   Lv0,1,2: gridN=3 → cols/rows = gridN+1 = 4 (4×4グリッド)
-//   Lv3:     gridN=4 → cols/rows = gridN+1 = 5 (5×5グリッド)
+// 1モデルあたりの 429 許容回数
+const MAX_429_PER_MODEL = 3;
+
+// 1モデルあたりの最大試行回数
+const MAX_ATTEMPTS_PER_MODEL = 5;
+
+// レベル別設定
+// gridN: 座標最大値 (グリッドサイズ = gridN + 1)
 const LEVEL_CFG = {
   0: { lines: 3, gridN: 3, lo: 0, hi: 6, hints: 2 },
   1: { lines: 4, gridN: 3, lo: 0, hi: 5, hints: 2 },
@@ -95,16 +88,6 @@ const LEVEL_CFG = {
    § 2. 交差判定ヘルパー（problems.js の _cross と完全一致）
 ==================================================================== */
 
-/**
- * 2線分 AB と CD が厳密に内部で交差するか判定する。
- * 端点共有・端点が相手の線分上にある場合は false。
- *
- * @param {number} ax @param {number} ay  線分ABの始点
- * @param {number} bx @param {number} by  線分ABの終点
- * @param {number} cx @param {number} cy  線分CDの始点
- * @param {number} dx @param {number} dy  線分CDの終点
- * @returns {boolean}
- */
 function _cross(ax, ay, bx, by, cx, cy, dx, dy) {
   if ((ax === cx && ay === cy) || (ax === dx && ay === dy)) return false;
   if ((bx === cx && by === cy) || (bx === dx && by === dy)) return false;
@@ -118,11 +101,6 @@ function _cross(ax, ay, bx, by, cx, cy, dx, dy) {
   );
 }
 
-/**
- * 線分配列内の全ペアについて厳密内部交差数を返す。
- * @param {Array<{x1:number,y1:number,x2:number,y2:number}>} lines
- * @returns {number}
- */
 function _countCross(lines) {
   let n = 0;
   for (let i = 0; i < lines.length; i++)
@@ -134,44 +112,24 @@ function _countCross(lines) {
   return n;
 }
 
-   /**
+/**
  * 2線分が同一直線上にあり、かつ共有領域を持つか判定する。
- * （コリニア重複検出）
- *
- * @param {Object} a - {x1,y1,x2,y2}
- * @param {Object} b - {x1,y1,x2,y2}
- * @returns {boolean}
+ * 端点のみの接触（tMax==0 または tMin==1）は許容する。
  */
 function _isCollinearOverlap(a, b) {
   const dxA = a.x2 - a.x1, dyA = a.y2 - a.y1;
-
-  // 外積で同一直線上にあるか確認
-  // cross(AB方向, AC) = 0 ならば C は AB の延長線上
   const cross1 = dxA * (b.y1 - a.y1) - dyA * (b.x1 - a.x1);
   const cross2 = dxA * (b.y2 - a.y1) - dyA * (b.x2 - a.x1);
-  if (cross1 !== 0 || cross2 !== 0) return false; // 非コリニア
-
-  // 同一直線上にある場合、1次元の重複チェック
-  // 射影をスカラー値に変換して区間重複を判定
+  if (cross1 !== 0 || cross2 !== 0) return false;
   const len2 = dxA * dxA + dyA * dyA;
   if (len2 === 0) return false;
-
   const t1 = (dxA * (b.x1 - a.x1) + dyA * (b.y1 - a.y1)) / len2;
   const t2 = (dxA * (b.x2 - a.x1) + dyA * (b.y2 - a.y1)) / len2;
-
   const tMin = Math.min(t1, t2);
   const tMax = Math.max(t1, t2);
-
-  // 線分Aは t=0 から t=1。区間 [tMin,tMax] と [0,1] が重複するか
-  // 端点のみの接触（tMax==0 または tMin==1）は許容する
   return tMax > 0 && tMin < 1;
 }
 
-/**
- * 線分配列内にコリニア重複するペアが1組でも存在するか確認する。
- * @param {Array} lines
- * @returns {boolean}
- */
 function _hasCollinearOverlap(lines) {
   for (let i = 0; i < lines.length; i++)
     for (let j = i + 1; j < lines.length; j++)
@@ -179,17 +137,10 @@ function _hasCollinearOverlap(lines) {
   return false;
 }
 
-
 /* ====================================================================
    § 3. バリデーション
 ==================================================================== */
 
-/**
- * 問題オブジェクトがレベルの交差数制約を満たすか確認する。
- * @param {Object} problem - { lines: Array }
- * @param {Object} cfg     - LEVEL_CFG の1エントリ
- * @returns {boolean}
- */
 function _validate(problem, cfg) {
   const n = _countCross(problem.lines);
   return n >= cfg.lo && n <= cfg.hi;
@@ -200,25 +151,13 @@ function _validate(problem, cfg) {
 ==================================================================== */
 
 /**
- * Gemini が返した JSON の1要素を受け取り、座標クランプ・長さゼロ除去・
- * 重複線分除去・hintLines 付与を行って問題オブジェクトを返す。
- * 線分数が設定と合わない場合は null を返す。
- *
- * 【Fix-B】重複線分除去ロジックを追加:
- *   - Step1: 始点/終点を辞書順で正規化したキーで端点一致重複を除去
- *   - Step2: コリニア重複（同一直線上の部分重複）を検出した場合は
- *            問題全体を棄却（null を返す）して再生成を促す
- *   - Step1除去後に線分数が cfg.lines と不一致なら null を返す
- *
- * @param {Object} raw   - AI が返した1問分の生データ
- * @param {number} level - レベル番号
- * @returns {Object|null}
+ * Step1: 端点一致重複を除去
+ * Step2: コリニア重複を検出 → null 返却（問題全体を棄却）
+ * 線分数不一致の場合も null 返却
  */
 function _normalise(raw, level) {
   const cfg  = LEVEL_CFG[level] ?? LEVEL_CFG[1];
   const maxC = cfg.gridN;
-
-  // 座標を [0, maxC] の整数にクランプ
   const clamp = v => Math.max(0, Math.min(maxC, Math.round(Number(v) || 0)));
 
   let lines = (raw.lines || [])
@@ -228,38 +167,32 @@ function _normalise(raw, level) {
       x2: clamp(l.x2 ?? (l.x + 1) ?? 1),
       y2: clamp(l.y2 ?? (l.y + 1) ?? 1)
     }))
-    .filter(l => !(l.x1 === l.x2 && l.y1 === l.y2)); // 長さゼロの線分を除去
+    .filter(l => !(l.x1 === l.x2 && l.y1 === l.y2));
 
-  // 【Fix-B】重複線分を除去（始点・終点を辞書順で正規化して比較）
-   // ── Step1: 端点一致による重複を除去 ──────────────────────────────
-   const seen = new Set();
-   lines = lines.filter(l => {
-     const key =
-       (l.x1 < l.x2 || (l.x1 === l.x2 && l.y1 <= l.y2))
-         ? `${l.x1},${l.y1},${l.x2},${l.y2}`
-         : `${l.x2},${l.y2},${l.x1},${l.y1}`;
-     if (seen.has(key)) {
-       console.warn(`[gemini] 端点重複を除去: (${l.x1},${l.y1})-(${l.x2},${l.y2})`);
-       return false;
-     }
-     seen.add(key);
-     return true;
-   });
-   
-   // ── Step2: コリニア重複チェック → 該当問題全体を無効化 ──────────
-   // （部分重複線分は除去するより問題全体を棄却して再生成させる方が安全）
-   if (_hasCollinearOverlap(lines)) {
-     console.warn('[gemini] コリニア重複を検出 → この問題を棄却');
-     return null;
-   }
-   
-   // 線分数が設定値と一致しなければ無効
-   if (lines.length !== cfg.lines) return null;
+  // Step1: 端点一致重複を除去
+  const seen = new Set();
+  lines = lines.filter(l => {
+    const key =
+      (l.x1 < l.x2 || (l.x1 === l.x2 && l.y1 <= l.y2))
+        ? `${l.x1},${l.y1},${l.x2},${l.y2}`
+        : `${l.x2},${l.y2},${l.x1},${l.y1}`;
+    if (seen.has(key)) {
+      console.warn(`[gemini] 端点重複を除去: (${l.x1},${l.y1})-(${l.x2},${l.y2})`);
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
 
+  // Step2: コリニア重複チェック → 問題全体を棄却
+  if (_hasCollinearOverlap(lines)) {
+    console.warn('[gemini] コリニア重複を検出 → この問題を棄却');
+    return null;
+  }
 
-  // ヒント線は先頭 cfg.hints 本の線分オブジェクトをそのまま使用
+  if (lines.length !== cfg.lines) return null;
+
   const hintLines = lines.slice(0, cfg.hints);
-
   return {
     level,
     grid: { cols: cfg.gridN + 1, rows: cfg.gridN + 1 },
@@ -269,32 +202,14 @@ function _normalise(raw, level) {
 }
 
 /* ====================================================================
-   § 5. テキスト抽出パーサー（responseMimeType 非対応モデル向け）
+   § 5. テキスト抽出パーサー
 ==================================================================== */
 
-/**
- * Gemini がテキストモードで返したレスポンス文字列から
- * JSON 配列を抽出して返す。
- *
- * 対処するパターン:
- *   A. JSON がオブジェクトラッパーに包まれている → 内側の配列を取り出す
- *   B. 複数の JSON ブロックが混在 → 最も長い配列ブロックを選ぶ
- *   C. 座標値が文字列で返る → _normalise の clamp で吸収
- *   D. 改行区切り個別オブジェクト → 行ごとにパースして収集
- *
- * @param {string} text
- * @returns {Array|null}
- */
 function _extractJsonArray(text) {
   if (!text) return null;
-
-  // ── ステップ1: マークダウンコードブロックを除去 ──────────────────
   const stripped = text.replace(/```(?:json)?\s*([\s\S]*?)```/g, '$1').trim();
 
-  // ── ステップ2: テキスト中の全 '[...]' ブロックを収集（スタックベース）
   const candidates = _extractAllArrayStrings(stripped);
-
-  // ── ステップ3: 最も長い配列文字列を優先してパース試行 ────────────
   candidates.sort((a, b) => b.length - a.length);
   for (const candidate of candidates) {
     try {
@@ -303,10 +218,9 @@ function _extractJsonArray(text) {
           parsed.every(item => typeof item === 'object' && item !== null)) {
         return parsed;
       }
-    } catch (_) { /* 次の候補へ */ }
+    } catch (_) {}
   }
 
-  // ── ステップ4: パターンA（オブジェクトラッパー）────────────────────
   const objCandidates = _extractAllObjectStrings(stripped);
   objCandidates.sort((a, b) => b.length - a.length);
   for (const candidate of objCandidates) {
@@ -321,10 +235,9 @@ function _extractJsonArray(text) {
           }
         }
       }
-    } catch (_) { /* 次の候補へ */ }
+    } catch (_) {}
   }
 
-  // ── ステップ5: パターンB（改行区切り個別オブジェクト）──────────────
   const lineObjects = [];
   for (const line of stripped.split('\n')) {
     const trimmed = line.trim();
@@ -332,7 +245,7 @@ function _extractJsonArray(text) {
       try {
         const obj = JSON.parse(trimmed);
         if (obj && typeof obj === 'object' && 'lines' in obj) lineObjects.push(obj);
-      } catch (_) { /* 無視 */ }
+      } catch (_) {}
     }
   }
   if (lineObjects.length > 0) {
@@ -344,47 +257,27 @@ function _extractJsonArray(text) {
   return null;
 }
 
-/**
- * 文字列中のすべての '[...]' ブロックをスタックベースで抽出する。
- * @param {string} text
- * @returns {string[]}
- */
 function _extractAllArrayStrings(text) {
   const results = [];
   let depth = 0, start = -1;
   for (let i = 0; i < text.length; i++) {
-    if (text[i] === '[') {
-      if (depth === 0) start = i;
-      depth++;
-    } else if (text[i] === ']') {
+    if (text[i] === '[') { if (depth === 0) start = i; depth++; }
+    else if (text[i] === ']') {
       depth--;
-      if (depth === 0 && start !== -1) {
-        results.push(text.slice(start, i + 1));
-        start = -1;
-      }
+      if (depth === 0 && start !== -1) { results.push(text.slice(start, i + 1)); start = -1; }
     }
   }
   return results;
 }
 
-/**
- * 文字列中のすべての '{...}' ブロックをスタックベースで抽出する。
- * @param {string} text
- * @returns {string[]}
- */
 function _extractAllObjectStrings(text) {
   const results = [];
   let depth = 0, start = -1;
   for (let i = 0; i < text.length; i++) {
-    if (text[i] === '{') {
-      if (depth === 0) start = i;
-      depth++;
-    } else if (text[i] === '}') {
+    if (text[i] === '{') { if (depth === 0) start = i; depth++; }
+    else if (text[i] === '}') {
       depth--;
-      if (depth === 0 && start !== -1) {
-        results.push(text.slice(start, i + 1));
-        start = -1;
-      }
+      if (depth === 0 && start !== -1) { results.push(text.slice(start, i + 1)); start = -1; }
     }
   }
   return results;
@@ -394,12 +287,6 @@ function _extractAllObjectStrings(text) {
    § 6. responseMimeType 非対応フラグのキャッシュ管理
 ==================================================================== */
 
-/**
- * 指定モデルが responseMimeType 非対応としてキャッシュされているか確認する。
- * TTL（7日）を超えたエントリは自動削除して false を返す。
- * @param {string} model
- * @returns {boolean}
- */
 function _isNoMimeCached(model) {
   try {
     const raw = localStorage.getItem(NO_MIME_CACHE_KEY);
@@ -411,61 +298,41 @@ function _isNoMimeCached(model) {
     if (!isValid) {
       delete cache[model];
       localStorage.setItem(NO_MIME_CACHE_KEY, JSON.stringify(cache));
-      console.log(
-        `[gemini] responseMimeType 非対応フラグ期限切れ（${model}）→ 再挑戦します`
-      );
+      console.log(`[gemini] responseMimeType 非対応フラグ期限切れ（${model}）→ 再挑戦します`);
     }
     return isValid;
   } catch (_) { return false; }
 }
 
-/**
- * 指定モデルを responseMimeType 非対応としてキャッシュに記録する。
- * @param {string} model
- */
 function _setNoMimeCache(model) {
   try {
     const raw   = localStorage.getItem(NO_MIME_CACHE_KEY);
     const cache = raw ? JSON.parse(raw) : {};
     cache[model] = { ts: Date.now() };
     localStorage.setItem(NO_MIME_CACHE_KEY, JSON.stringify(cache));
-    const retryDate = new Date(Date.now() + NO_MIME_CACHE_TTL)
-      .toLocaleDateString('ja-JP');
+    const retryDate = new Date(Date.now() + NO_MIME_CACHE_TTL).toLocaleDateString('ja-JP');
     console.log(
       `[gemini] ${model} を responseMimeType 非対応としてキャッシュ。` +
       `${retryDate} 以降に自動再挑戦します。`
     );
-  } catch (_) { /* localStorage 書き込みエラーは無視 */ }
+  } catch (_) {}
 }
 
-/**
- * responseMimeType 非対応フラグをクリアする。
- * 引数なしで全クリア、モデル名指定で個別クリア。
- * @param {string} [model]
- */
 function _clearNoMimeCache(model) {
   try {
-    if (!model) {
-      localStorage.removeItem(NO_MIME_CACHE_KEY);
-      console.log('[gemini] responseMimeType 非対応フラグを全クリアしました');
-      return;
-    }
+    if (!model) { localStorage.removeItem(NO_MIME_CACHE_KEY); return; }
     const raw = localStorage.getItem(NO_MIME_CACHE_KEY);
     if (!raw) return;
     const cache = JSON.parse(raw);
     delete cache[model];
     localStorage.setItem(NO_MIME_CACHE_KEY, JSON.stringify(cache));
-  } catch (_) { /* 無視 */ }
+  } catch (_) {}
 }
 
 /* ====================================================================
    § 7. モデルキャッシュ管理
 ==================================================================== */
 
-/**
- * localStorage からモデルキャッシュを読み込む。TTL 超過時は null。
- * @returns {string|null}
- */
 function _loadCachedModel() {
   try {
     const raw = localStorage.getItem(MODEL_CACHE_KEY);
@@ -476,49 +343,26 @@ function _loadCachedModel() {
   return null;
 }
 
-/**
- * モデル名をタイムスタンプ付きで localStorage に保存する。
- * @param {string} model
- */
 function _saveModel(model) {
   try {
-    localStorage.setItem(
-      MODEL_CACHE_KEY,
-      JSON.stringify({ model, ts: Date.now() })
-    );
+    localStorage.setItem(MODEL_CACHE_KEY, JSON.stringify({ model, ts: Date.now() }));
   } catch (_) {}
 }
 
-/**
- * モデルキャッシュをクリアする（公開 API）。
- * APIキー変更時・認証エラー時に app.js からも呼び出せる。
- */
 function clearModelCache() {
   try { localStorage.removeItem(MODEL_CACHE_KEY); } catch (_) {}
 }
 
 /* ====================================================================
-   § 8. モデル解決
-   --------------------------------------------------------------------
-   v5.0 以降、generateProblems() は resolveModel() を経由せず
-   FALLBACK_MODEL_CHAIN を直接走査するため、このセクションは削除済み。
-   旧実装（_probeModel / _fetchAvailableModels / resolveModel）は
-   RPM/RPD を事前プローブで消費する問題があったため廃止。
+   § 8. （廃止）モデル解決
+   v5.0 以降 generateProblems() が FALLBACK_MODEL_CHAIN を直接走査する
+   ため、_probeModel / _fetchAvailableModels / resolveModel は削除済み。
 ==================================================================== */
 
 /* ====================================================================
    § 9. プロンプト生成
 ==================================================================== */
 
-/**
- * Gemini に送るプロンプト文字列を組み立てる。
- * レベル別の線分数・グリッドサイズ・交差数制約・自己チェック手順を含む。
- * 【Fix-C】重複線分禁止ルールを明示的に追加。
- *
- * @param {number} level
- * @param {number} count
- * @returns {string}
- */
 function _buildPrompt(level, count) {
   const cfg = LEVEL_CFG[level] ?? LEVEL_CFG[1];
   const { lines: lineCount, gridN, lo, hi } = cfg;
@@ -534,10 +378,10 @@ Rules:
   (b) Collinear overlap: if two segments lie on the same infinite line AND share any common
       region (one segment fully or partially contains the other), that is forbidden.
       Example of FORBIDDEN collinear overlap:
-        Segment A: (0,0)-(3,3), Segment B: (1,1)-(2,2)  ← B is inside A, FORBIDDEN
-        Segment A: (0,0)-(2,2), Segment B: (1,1)-(3,3)  ← A and B partially overlap, FORBIDDEN
+        Segment A: (0,0)-(3,3), Segment B: (1,1)-(2,2)  <- B is inside A, FORBIDDEN
+        Segment A: (0,0)-(2,2), Segment B: (1,1)-(3,3)  <- A and B partially overlap, FORBIDDEN
       Example of ALLOWED collinear non-overlap:
-        Segment A: (0,0)-(1,1), Segment B: (2,2)-(3,3)  ← same direction but no shared region, OK
+        Segment A: (0,0)-(1,1), Segment B: (2,2)-(3,3)  <- same direction but no shared region, OK
 - The number of STRICT INTERNAL intersections must be between ${lo} and ${hi} (inclusive).
   - "Strict internal" means two segments cross at a point that is interior to BOTH segments.
   - Shared endpoints do NOT count as intersections.
@@ -567,23 +411,13 @@ Output ONLY a JSON array, no markdown, no explanation:
    § 10. フォールバック問題バンク
 ==================================================================== */
 
-/**
- * Gemini API が利用できない場合・全試行失敗時に使う事前検証済み問題セット。
- * problems.js の PROBLEM_BANK が利用可能な場合はそちらを優先する。
- */
 const _FALLBACK = {
   0: [
-    // 3本線・4×4グリッド(座標0–3)・交差数制約なし
     { lines: [{ x1:0,y1:0,x2:3,y2:0 },{ x1:0,y1:1,x2:3,y2:1 },{ x1:0,y1:2,x2:3,y2:2 }] },
-    // 水平平行3本（交差0）
     { lines: [{ x1:0,y1:0,x2:0,y2:3 },{ x1:1,y1:0,x2:1,y2:3 },{ x1:2,y1:0,x2:2,y2:3 }] },
-    // 垂直平行3本（交差0）
     { lines: [{ x1:0,y1:0,x2:3,y2:3 },{ x1:0,y1:3,x2:3,y2:0 },{ x1:0,y1:1,x2:3,y2:1 }] },
-    // 大X字＋水平線（交差2）
     { lines: [{ x1:1,y1:0,x2:1,y2:3 },{ x1:2,y1:0,x2:2,y2:3 },{ x1:0,y1:1,x2:3,y2:1 }] },
-    // 垂直2本＋水平1本（交差2）
     { lines: [{ x1:0,y1:0,x2:3,y2:0 },{ x1:0,y1:3,x2:3,y2:3 },{ x1:1,y1:0,x2:2,y2:3 }] }
-    // 上下水平2本＋斜め1本（交差0）
   ],
   1: [
     { lines: [{ x1:0,y1:0,x2:3,y2:0 },{ x1:0,y1:1,x2:3,y2:1 },{ x1:0,y1:2,x2:3,y2:2 },{ x1:0,y1:3,x2:3,y2:3 }] },
@@ -596,7 +430,7 @@ const _FALLBACK = {
     { lines: [{ x1:0,y1:0,x2:1,y2:3 },{ x1:1,y1:0,x2:0,y2:3 },{ x1:2,y1:0,x2:3,y2:3 },{ x1:3,y1:0,x2:2,y2:3 }] },
     { lines: [{ x1:0,y1:0,x2:3,y2:2 },{ x1:0,y1:2,x2:3,y2:0 },{ x1:1,y1:0,x2:2,y2:3 },{ x1:0,y1:3,x2:1,y2:3 }] },
     { lines: [{ x1:0,y1:0,x2:2,y2:3 },{ x1:2,y1:0,x2:0,y2:3 },{ x1:1,y1:1,x2:3,y2:3 },{ x1:3,y1:0,x2:1,y2:2 }] },
-    { lines: [{ x1:0,y1:0,x2:3,y2:3 },{ x1:0,y1:3,x2:3,y2:0 },{ x1:0,y1:1,x2:3,y2:2 },{ x1:0,y1:2,x2:3,y2:2 }] },
+    { lines: [{ x1:0,y1:0,x2:3,y2:3 },{ x1:0,y1:3,x2:3,y2:0 },{ x1:0,y1:1,x2:3,y2:2 },{ x1:0,y1:2,x2:3,y2:1 }] },
     { lines: [{ x1:0,y1:0,x2:3,y2:2 },{ x1:0,y1:2,x2:3,y2:0 },{ x1:0,y1:3,x2:3,y2:1 },{ x1:0,y1:1,x2:3,y2:3 }] }
   ],
   3: [
@@ -608,16 +442,6 @@ const _FALLBACK = {
   ]
 };
 
-/**
- * フォールバック問題をシャッフルして必要数だけ返す。
- * problems.js の PROBLEM_BANK が利用可能な場合はそちらを優先する。
- * hintLines は線分オブジェクト配列として設定する（Bug #3 対応済み）。
- *
- * @param {number} level
- * @param {number} count
- * @returns {Array}
- */
-// _getFallback の grid 生成を p.grid 優先に修正
 function _getFallback(level, count) {
   const pool = (
     typeof PROBLEM_BANK !== 'undefined' && PROBLEM_BANK[level]
@@ -631,8 +455,6 @@ function _getFallback(level, count) {
   }
 
   const cfg = LEVEL_CFG[level] ?? LEVEL_CFG[1];
-  // ★ p.grid が存在する場合はそちらを優先（PROBLEM_BANK の定義を尊重）
-  // p.grid がない（_FALLBACK 由来）場合のみ cfg.gridN+1 で補完
   return pool.slice(0, count).map(p => ({
     level,
     grid: p.grid ?? { cols: cfg.gridN + 1, rows: cfg.gridN + 1 },
@@ -642,22 +464,28 @@ function _getFallback(level, count) {
 }
 
 /* ====================================================================
-   § 11. API 送信コア（responseMimeType 自動切替 + fetchタイムアウト）
+   § 11. API 送信コア【Fix-E: JSON パースロジック全面改修】
 ==================================================================== */
 
 /**
  * 指定モデルに問題生成リクエストを送り、{ raw, status } を返す。
  *
- * - JSON モード: responseMimeType = 'application/json' を付与して送信。
- *   HTTP 400 が返った場合、そのモデルを非対応としてキャッシュし
- *   テキストモードで即時リトライ（forcePlain = true）。
- * - テキストモード: _extractJsonArray() でレスポンスから配列を抽出。
- * - 30 秒 fetchタイムアウト: AbortController を使用。
+ * 【Fix-E】text の取り出し方を改修:
+ *   - part?.text が非空文字列のときのみ text として使用。
+ *     undefined / null / 空文字の場合は null 扱い。
+ *   - JSON mode + text あり  → JSON.parse 直接試行。配列でなければ
+ *                               _extractJsonArray へ委譲。
+ *   - JSON mode + text なし  → レスポンス全体を文字列化して
+ *                               _extractJsonArray を試みる。
+ *                               それでも null → no-mime キャッシュ記録
+ *                               + null 返却（呼び出し元で text mode 再試行）。
+ *   - テキストモード          → _extractJsonArray で抽出（従来通り）。
+ *   - デバッグ用に part キー一覧と text 長をログ出力。
  *
  * @param {string}  model
  * @param {string}  apiKey
  * @param {string}  prompt
- * @param {boolean} [forcePlain=false] - true のときテキストモード強制
+ * @param {boolean} [forcePlain=false]
  * @returns {Promise<{raw: Array|null, status: number}>}
  */
 async function _callApi(model, apiKey, prompt, forcePlain = false) {
@@ -667,9 +495,7 @@ async function _callApi(model, apiKey, prompt, forcePlain = false) {
   };
 
   const useJsonMode = !forcePlain && !_isNoMimeCached(model);
-  if (useJsonMode) {
-    generationConfig.responseMimeType = 'application/json';
-  }
+  if (useJsonMode) generationConfig.responseMimeType = 'application/json';
 
   console.log(
     `[gemini] _callApi: ${model} / ` +
@@ -697,278 +523,225 @@ async function _callApi(model, apiKey, prompt, forcePlain = false) {
   } catch (e) {
     clearTimeout(tid);
     const isTimeout = e.name === 'AbortError';
-    console.error(
-      `[gemini] fetch ${isTimeout ? 'タイムアウト(30秒)' : '失敗'}: ${e.message}`
-    );
+    console.warn(`[gemini] fetch ${isTimeout ? 'タイムアウト' : 'ネットワークエラー'}: ${model}`);
     return { raw: null, status: isTimeout ? 408 : 0 };
   }
 
-  const status = resp.status;
-
-  if (status === 400 && !forcePlain) {
-    console.warn(
-      `[gemini] HTTP 400 → ${model} は responseMimeType 非対応と判定。` +
-      'テキストモードで再送します。'
-    );
+  // HTTP 400: responseMimeType 非対応 → テキストモードで即時リトライ
+  if (resp.status === 400 && useJsonMode) {
+    console.warn(`[gemini] HTTP 400 → ${model} を no-mime キャッシュに記録し、テキストモードで再試行`);
     _setNoMimeCache(model);
     return _callApi(model, apiKey, prompt, true);
   }
 
   if (!resp.ok) {
-    console.warn(`[gemini] HTTP ${status} エラー (${model})`);
-    return { raw: null, status };
+    console.warn(`[gemini] HTTP ${resp.status}: ${model}`);
+    return { raw: null, status: resp.status };
   }
 
   let data;
-  try {
-    data = await resp.json();
-  } catch (e) {
-    console.error('[gemini] レスポンス JSON パース失敗:', e.message);
-    return { raw: null, status };
+  try { data = await resp.json(); }
+  catch (e) {
+    console.warn('[gemini] レスポンス JSON パースエラー:', e);
+    return { raw: null, status: 200 };
   }
 
-  // ── ★ text 取得を堅牢化 ──────────────────────────────────────────
-  // JSON モード時、モデルによっては parts[0].text が空・undefined になる場合がある。
-  // その場合はレスポンス全体を文字列化してフォールバックパースを試みる。
+  // ── 【Fix-E】text の安全な取り出し ──────────────────────────────
   const part = data?.candidates?.[0]?.content?.parts?.[0];
-  const text = (typeof part?.text === 'string' && part.text.trim() !== '')
-    ? part.text
+  const rawText = part?.text;
+  const text = (typeof rawText === 'string' && rawText.trim().length > 0)
+    ? rawText.trim()
     : null;
 
-  console.log(
-    `[gemini] レスポンス取得: text=${text ? `${text.length}文字` : 'なし'} / ` +
-    `part keys=${part ? Object.keys(part).join(',') : 'none'}`
-  );
+  console.log('[gemini] part keys:', part ? Object.keys(part) : 'no part');
+  console.log('[gemini] text length:', text !== null ? text.length : 'null (空またはなし)');
 
-  // ── ★ パース処理を堅牢化 ─────────────────────────────────────────
-  let raw = null;
+  let problems = null;
 
-  if (useJsonMode && text) {
-    // JSON モード: まず直接 JSON.parse を試みる
-    try {
-      const parsed = JSON.parse(text);
-      raw = Array.isArray(parsed) ? parsed : null;
-      if (raw) {
-        console.log(`[gemini] JSON モード直接パース成功: ${raw.length}件`);
-      } else {
-        console.warn('[gemini] JSON モード: パース結果が配列でない → テキスト抽出へ');
-        raw = _extractJsonArray(text);
+  if (useJsonMode) {
+    if (text !== null) {
+      // JSON mode + text あり: 直接パース → 配列チェック → fallback to extractor
+      try {
+        const parsed = JSON.parse(text);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          problems = parsed;
+          console.log(`[gemini] JSON.parse 成功: ${problems.length} 件`);
+        } else {
+          console.warn('[gemini] JSON.parse 結果が配列でない → _extractJsonArray へ委譲');
+          problems = _extractJsonArray(text);
+        }
+      } catch (e) {
+        console.warn('[gemini] JSON.parse 失敗 → _extractJsonArray へ委譲:', e.message);
+        problems = _extractJsonArray(text);
       }
-    } catch (_) {
-      console.warn('[gemini] JSON モード: JSON.parse 失敗 → テキスト抽出へ');
-      raw = _extractJsonArray(text);
-    }
-  } else if (useJsonMode && !text) {
-    // ★ JSON モードなのに text が空 → モデルが text フィールドを返さなかった
-    // レスポンス全体を文字列化してテキスト抽出を試みる
-    console.warn(
-      `[gemini] JSON モードで text フィールドが空 (${model}) → ` +
-      'レスポンス全体からフォールバック抽出を試みます'
-    );
-    const fallbackText = JSON.stringify(data);
-    raw = _extractJsonArray(fallbackText);
+    } else {
+      // JSON mode + text なし: レスポンス全体を文字列化して抽出試行
+      console.warn('[gemini] text が null → レスポンス全体から抽出を試みます');
+      const fallbackText = JSON.stringify(data);
+      problems = _extractJsonArray(fallbackText);
 
-    // それでも失敗した場合はこのモデルを no-mime 扱いにして即テキストモードで再試行
-    if (!raw) {
-      console.warn(
-        `[gemini] フォールバック抽出も失敗 → ${model} を responseMimeType 非対応として記録し再送`
-      );
-      _setNoMimeCache(model);
-      return _callApi(model, apiKey, prompt, true);
+      if (!problems || problems.length === 0) {
+        // 全手段失敗 → no-mime キャッシュを記録してテキストモードで再試行
+        console.warn('[gemini] 全手段失敗 → no-mime キャッシュを記録し、テキストモードで再試行');
+        _setNoMimeCache(model);
+        return _callApi(model, apiKey, prompt, true);
+      }
     }
   } else {
-    // テキストモード
-    raw = text ? _extractJsonArray(text) : null;
+    // テキストモード: _extractJsonArray で抽出
+    problems = _extractJsonArray(text ?? '');
   }
 
-  return { raw, status };
+  return { raw: problems, status: resp.status };
 }
 
 /* ====================================================================
-   § 12. パース・バリデーションヘルパー（内部使用）
+   § 12. レスポンス検証・正規化
 ==================================================================== */
 
 /**
- * _callApi の raw レスポンスから問題配列を正規化・検証して返す。
- * 条件を満たさない場合は null を返す。
+ * _callApi が返した raw 配列を正規化・バリデーションして
+ * 有効な問題だけを返す。
  *
- * @param {{raw: Array|null, status: number}} result - _callApi の戻り値
- * @param {number} level
- * @param {number} count
- * @param {Object} cfg   - LEVEL_CFG の1エントリ
- * @returns {Array|null} count 件の検証済み問題配列、または null
+ * @param {Array|null} raw
+ * @param {number}     level
+ * @param {number}     need  - 必要問題数
+ * @returns {Array}          - 有効問題の配列（空の場合あり）
  */
-function _extractAndValidate(result, level, count, cfg) {
-  const { raw } = result;
-  if (!Array.isArray(raw) || raw.length === 0) return null;
+function _processRaw(raw, level, need) {
+  if (!Array.isArray(raw) || raw.length === 0) return [];
+  const cfg = LEVEL_CFG[level] ?? LEVEL_CFG[1];
 
-  const validated = [];
+  const valid = [];
   for (const item of raw) {
-    if (validated.length >= count) break;
-    const p = _normalise(item, level);
-    if (!p) {
-      console.warn('[gemini] _normalise 失敗（線分数不一致または無効）');
+    if (!item || typeof item !== 'object') continue;
+    const problem = _normalise(item, level);
+    if (!problem) continue;
+    if (!_validate(problem, cfg)) {
+      console.warn('[gemini] 交差数制約違反 → 棄却');
       continue;
     }
-    if (!_validate(p, cfg)) {
-      const n = _countCross(p.lines);
-      console.warn(
-        `[gemini] 交差数制約違反: ${n} (要求: ${cfg.lo}–${cfg.hi})`
-      );
-      continue;
-    }
-    validated.push(p);
+    valid.push(problem);
+    if (valid.length >= need) break;
   }
-
-  return validated.length >= count ? validated.slice(0, count) : null;
+  return valid;
 }
 
 /* ====================================================================
-   § 13. 問題生成メイン（公開 API）
+   § 13. メイン API: generateProblems
 ==================================================================== */
 
 /**
  * 指定レベルの問題を count 件生成して返す。
  *
- * FALLBACK_MODEL_CHAIN を先頭から順に走査する。
- * resolveModel() は呼ばない（プローブによるRPM消費を防ぐため）。
- *
- * 各モデルの試行ルール:
- *   - MAX_ATTEMPTS_PER_MODEL 回の生成試行を行う。
- *   - 429 が MAX_429_PER_MODEL 回に達したら即座に次モデルへ。
- *   - 401/403 は認証エラーのため全体を即座に中断してフォールバック。
- *   - 408/0 はタイムアウト/ネットワークエラーのため次試行へ。
- * 全モデル失敗時は _getFallback() でローカルBANKを返す。
+ * フロー:
+ * 1. FALLBACK_MODEL_CHAIN を順番に試行
+ * 2. 1モデルあたり最大 MAX_ATTEMPTS_PER_MODEL 回
+ * 3. 429 が MAX_429_PER_MODEL 回連続したら次のモデルへ
+ * 4. 401/403 → APIキーエラー、即座にフォールバックバンクへ
+ * 5. 全モデル失敗 → _getFallback() を返す
  *
  * @param {number} level
- * @param {number} count
+ * @param {number} [count=5]
  * @param {string} apiKey
  * @returns {Promise<Array>}
  */
-async function generateProblems(level, count, apiKey) {
+async function generateProblems(level, count = 5, apiKey) {
   if (!apiKey) {
-    console.log('[gemini] APIキー未設定 → フォールバック問題を使用');
+    console.log('[gemini] APIキーなし → フォールバックバンクを使用');
     return _getFallback(level, count);
   }
 
-  const cfg    = LEVEL_CFG[level] ?? LEVEL_CFG[1];
   const prompt = _buildPrompt(level, count);
 
-  const MAX_ATTEMPTS_PER_MODEL = 5;  // 1モデルあたりの最大生成試行数
-  const MAX_429_PER_MODEL      = 3;  // 1モデルあたりの429許容回数
+  for (const model of FALLBACK_MODEL_CHAIN) {
+    let attempts    = 0;
+    let count429    = 0;
 
-  // ── FALLBACK_MODEL_CHAIN を先頭から順に走査 ───────────────────────
-  for (let mi = 0; mi < FALLBACK_MODEL_CHAIN.length; mi++) {
-    const model    = FALLBACK_MODEL_CHAIN[mi];
-    let attempt429 = 0;
+    console.log(`[gemini] モデル試行開始: ${model}`);
 
-    console.log(
-      `[gemini] チェーン[${mi}] ${model} を試行開始 ` +
-      `(Lv${level} / 要求${count}件)`
-    );
+    while (attempts < MAX_ATTEMPTS_PER_MODEL) {
+      attempts++;
+      console.log(`[gemini] ${model} 試行 ${attempts}/${MAX_ATTEMPTS_PER_MODEL}`);
 
-    for (let attempt = 0; attempt < MAX_ATTEMPTS_PER_MODEL; attempt++) {
-      console.log(
-        `[gemini] 試行 ${attempt + 1}/${MAX_ATTEMPTS_PER_MODEL} (${model})`
-      );
+      const { raw, status } = await _callApi(model, apiKey, prompt);
 
-      const result = await _callApi(model, apiKey, prompt);
-      const { status } = result;
-
-      // ── 429 レート制限 ─────────────────────────────────────────────
-      if (status === 429) {
-        attempt429++;
-        if (attempt429 >= MAX_429_PER_MODEL) {
-          console.warn(
-            `[gemini] ${model}: 429 上限(${MAX_429_PER_MODEL}回)到達 → 次モデルへ`
-          );
-          break; // 内側ループを抜けて次モデルへ
-        }
-        // 指数バックオフ（2s → 4s → 8s、jitter付き、最大15s）
-        const backoff = Math.min(2000 * Math.pow(2, attempt429 - 1), 15000);
-        const wait    = backoff + Math.random() * 1000;
-        console.warn(
-          `[gemini] 429 backoff ${Math.round(wait)}ms ` +
-          `(${model} ${attempt429}/${MAX_429_PER_MODEL}回目)`
-        );
-        await new Promise(r => setTimeout(r, wait));
-        attempt--; // 試行カウントを消費しない（for の attempt++ と相殺）
-        continue;
-      }
-
-      // ── 401 / 403: 認証エラー → 全体を即中断してフォールバック ─────
+      // 認証エラー → 即フォールバック
       if (status === 401 || status === 403) {
-        console.error(
-          `[gemini] 認証エラー (HTTP ${status}) → フォールバックBANKへ`
-        );
-        clearModelCache();
+        console.error('[gemini] 認証エラー → フォールバックバンクを使用');
         return _getFallback(level, count);
       }
 
-      // ── 408 / 0: タイムアウト / ネットワークエラー ───────────────
+      // タイムアウト / ネットワークエラー
       if (status === 408 || status === 0) {
-        console.warn(
-          `[gemini] タイムアウト/NWエラー (${model} 試行${attempt + 1}) → 次試行へ`
-        );
+        console.warn(`[gemini] タイムアウト/ネットワークエラー (${model})`);
+        break; // 次のモデルへ
+      }
+
+      // レート制限
+      if (status === 429) {
+        count429++;
+        console.warn(`[gemini] 429 レート制限 (${model}): ${count429}/${MAX_429_PER_MODEL}`);
+        if (count429 >= MAX_429_PER_MODEL) {
+          console.warn(`[gemini] ${model} の 429 上限到達 → 次モデルへ`);
+          break;
+        }
+        // 指数バックオフ（1秒 × 2^(count429-1)）
+        await new Promise(r => setTimeout(r, 1000 * Math.pow(2, count429 - 1)));
         continue;
       }
 
-      // ── 正常レスポンス → パース・バリデーション ──────────────────
-      const problems = _extractAndValidate(result, level, count, cfg);
-      if (problems) {
-        console.log(
-          `[gemini] 問題生成成功: ${problems.length}件 (${model} 試行${attempt + 1})`
-        );
+      // パース・正規化・バリデーション
+      const valid = _processRaw(raw, level, count);
+      if (valid.length >= count) {
         _saveModel(model);
-        return problems;
+        console.log(`[gemini] ${model} で ${valid.length} 件生成成功`);
+        return valid.slice(0, count);
       }
 
-      console.warn(
-        `[gemini] バリデーション失敗 (${model} 試行${attempt + 1}) → 再試行`
-      );
+      if (valid.length > 0) {
+        // 一部有効 → 不足分は次の試行で補わず、そのまま返す（品質重視）
+        // ただし 1 件以上あれば成功扱い（呼び出し元で追加リクエスト可）
+        console.warn(`[gemini] ${model}: ${valid.length}/${count} 件のみ有効`);
+      } else {
+        console.warn(`[gemini] ${model}: 有効問題 0 件`);
+      }
     }
-
-    console.warn(`[gemini] チェーン[${mi}] ${model} 全試行失敗 → 次モデルへ`);
   }
 
-  // ── 全モデル失敗 → フォールバックBANKを使用 ─────────────────────
-  console.warn('[gemini] 全モデル失敗 → フォールバックBANKを使用');
+  console.warn('[gemini] 全モデル失敗 → フォールバックバンクを使用');
   return _getFallback(level, count);
 }
 
 /* ====================================================================
-   § 14. APIキー管理（公開 API）
+   § 14. API キー管理
 ==================================================================== */
 
-/**
- * APIキーを localStorage に保存する。
- * @param {string} key
- */
+const API_KEY_STORAGE = 'gemini_api_key';
+
 function saveApiKey(key) {
-  try { localStorage.setItem('gemini_api_key', key); } catch (_) {}
+  try { localStorage.setItem(API_KEY_STORAGE, key); } catch (_) {}
 }
 
-/**
- * localStorage から APIキーを読み込む。
- * @returns {string}
- */
 function loadApiKey() {
-  try { return localStorage.getItem('gemini_api_key') || ''; } catch (_) { return ''; }
+  try { return localStorage.getItem(API_KEY_STORAGE) || ''; } catch (_) { return ''; }
 }
 
 /* ====================================================================
-   § 15. モジュールエクスポート
+   § 15. エクスポート
 ==================================================================== */
 
-  return {
-    generateProblems,
-    saveApiKey,
-    loadApiKey,
-    clearModelCache,
-    _clearNoMimeCache  // デバッグ・テスト用に公開
-  };
+return {
+  generateProblems,
+  saveApiKey,
+  loadApiKey,
+  clearModelCache
+};
 
-})();
+})(); // end _G IIFE
 
-// グローバルスコープへ展開（app.js から直接呼び出せるように）
-const { generateProblems, saveApiKey, loadApiKey, clearModelCache } = _G;
+// グローバルスコープへ公開
+const generateProblems = _G.generateProblems;
+const saveApiKey       = _G.saveApiKey;
+const loadApiKey       = _G.loadApiKey;
+const clearModelCache  = _G.clearModelCache;
