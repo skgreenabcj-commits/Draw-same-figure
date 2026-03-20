@@ -20,6 +20,14 @@
       <div class="level-select">
         <p class="level-label">レベルを えらんでね</p>
         <div class="level-buttons">
+
+          <!-- ★ Lv0 追加 -->
+          <button class="level-btn" data-level="0">
+            <span class="lv-icon">🌟</span>
+            <span class="lv-name">レベル０</span>
+            <span class="lv-desc">4×4 ・ さいしょの１ぽん</span>
+          </button>
+
           <button class="level-btn" data-level="1">
             <span class="lv-icon">⭐</span>
             <span class="lv-name">レベル１</span>
@@ -40,7 +48,9 @@
 
       <!-- Gemini API Key 入力 -->
       <div class="api-section">
-        <button id="btn-toggle-api" class="btn-text-small"><i class="fa fa-robot"></i> AIで問題を作る（Gemini APIキー）</button>
+        <button id="btn-toggle-api" class="btn-text-small">
+          <i class="fa fa-robot"></i> AIで問題を作る（Gemini APIキー）
+        </button>
         <div id="api-key-panel" class="hidden">
           <input id="input-api-key" type="password" placeholder="Gemini API Key を入力..." />
           <button id="btn-save-api" class="btn-small">保存</button>
@@ -72,10 +82,9 @@
     <main class="game-main">
       <div class="problem-row">
 
-        <!-- 左：模範図 -->
+        <!-- 左：みほん -->
         <div class="panel">
           <p class="panel-label">みほん</p>
-          <!-- グリッドヘッダー付きラッパー -->
           <div class="grid-outer" id="grid-outer-model">
             <div class="col-header" id="col-header-model"></div>
             <div class="grid-body">
@@ -90,7 +99,6 @@
         <!-- 右：回答欄 -->
         <div class="panel">
           <p class="panel-label">かいてみよう</p>
-          <!-- グリッドヘッダー付きラッパー -->
           <div class="grid-outer" id="grid-outer-answer">
             <div class="col-header" id="col-header-answer"></div>
             <div class="grid-body">
@@ -105,8 +113,10 @@
 
       </div>
 
-      <!-- ヒントメッセージ（Level1用） -->
-      <p id="hint-msg" class="hint-msg hidden">のこり<span id="hint-remain"></span>ほんのせんをかこう！</p>
+      <!-- ヒントメッセージ（Lv0 / Lv1 用） -->
+      <p id="hint-msg" class="hint-msg hidden">
+        のこり<span id="hint-remain"></span>ほんのせんをかこう！
+      </p>
 
       <!-- ボタン行 -->
       <div class="action-row">
@@ -123,12 +133,16 @@
           <p class="fb-title wrong">もう すこし！</p>
           <p class="fb-desc">みどりせんが　ただしい　せんだよ</p>
           <canvas id="canvas-wrong"></canvas>
-          <button id="btn-next-wrong" class="btn-primary mt16">つぎへ <i class="fa fa-arrow-right"></i></button>
+          <button id="btn-next-wrong" class="btn-primary mt16">
+            つぎへ <i class="fa fa-arrow-right"></i>
+          </button>
         </div>
         <div id="feedback-correct" class="hidden">
           <img src="images/gotit.png" alt="せいかい！" class="gotit-img" />
           <p class="fb-title correct" id="praise-text"></p>
-          <button id="btn-next-correct" class="btn-primary mt16">つぎへ <i class="fa fa-arrow-right"></i></button>
+          <button id="btn-next-correct" class="btn-primary mt16">
+            つぎへ <i class="fa fa-arrow-right"></i>
+          </button>
         </div>
       </div>
     </div>
