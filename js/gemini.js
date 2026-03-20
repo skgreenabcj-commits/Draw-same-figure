@@ -1,38 +1,37 @@
 'use strict';
 
 /* =====================================================================
-   gemini.js  v4.2
+   gemini.js  v5.0
    -----------------------------------------------------------------------
-   v4.0 からの変更点:
-     【Bug修正】_fetchAvailableModels() にタイムアウト追加
-       - AbortController で 8 秒タイムアウトを設定
-       - タイムアウト・エラー時は null を返してフォールバックへ移行
-       - これにより resolveModel() がネットワーク不安定時にフリーズする
-         問題（「AIが問題を作っています…」で永久停止）を修正
+   v5.0 からの変更点（v4.2 → v5.0）:
+     【新機能】429レート制限時のモデルフォールバックチェーン
+       - FALLBACK_MODEL_CHAIN を §1 に定数として定義
+       - gemini-2.5-flash → gemini-2.5-flash-lite →
+         gemini-3.1-flash-lite-preview の順で自動切替
+       - 1モデルあたりの429許容回数(MAX_429_PER_MODEL)を超えたら
+         即座に次モデルへ移行し、無限ループを完全防止
+       - 全モデル失敗時は _getFallback() へフォールオーバー
+       - _extractAndValidate() を内部ヘルパーとして切り出し、
+         generateProblems() の可読性を向上
 
-   v4.0 の機能（維持）:
-     【新機能】responseMimeType 非対応モデル検出と自動フォールバック
-       - responseMimeType: 'application/json' 付きで送信を試みる
-       - HTTP 400 が返った場合、そのモデルが responseMimeType 非対応と判定
-       - 「非対応フラグ」を localStorage に 7 日間キャッシュ
-       - キャッシュ期間中はテキスト抽出 + JSON パース方式で送信
-       - 7 日後にキャッシュが自動失効 → responseMimeType で再挑戦
-       - APIキー変更時は非対応フラグも同時にクリア
-
+   v4.2 の機能（維持）:
+     【Bug修正】_fetchAvailableModels() 8秒タイムアウト
+     【Bug修正】_callApi() 30秒 fetchタイムアウト
+     【Bug修正】429 無限ループ防止（MAX_RETRY_429）
+     【新機能】responseMimeType 非対応モデル自動検出 + 7日キャッシュ
      【改善】テキスト抽出パーサーの強化
-       - 最長の JSON 配列ブロックを選ぶアルゴリズムに変更
-       - パターンA（オブジェクトラッパー）の自動アンラップ処理を追加
-       - パターンB（改行区切り個別オブジェクト）の検出処理を追加
+       - パターンA（オブジェクトラッパー）自動アンラップ
+       - パターンB（改行区切り個別オブジェクト）検出
+     【既存機能】動的モデル選択（並列プローブ + 24時間キャッシュ）
 
-   既存の機能:
-     - 動的モデル選択（並列プローブ + 24 時間キャッシュ）
-     - 交差点検証は problems.js の _cross と完全一致
-     - 外部依存なし・完全自己完結
-     - レベル別制約:
-         Lv0: 交差0-2  (4本, 4x4グリッド)
-         Lv1: 交差0-3  (4本, 4x4グリッド)
-         Lv2: 交差2-5  (4本, 4x4グリッド)
-         Lv3: 交差0-8  (5本, 5x5グリッド)
+   レベル別制約:
+     Lv0: 交差0-2  (4本, 4×4グリッド, ヒント3本)
+     Lv1: 交差0-3  (4本, 4×4グリッド, ヒント2本)
+     Lv2: 交差2-5  (4本, 4×4グリッド, ヒントなし)
+     Lv3: 交差0-8  (5本, 5×5グリッド, ヒントなし)
+
+   外部依存なし・完全自己完結。
+   交差判定 _cross は problems.js の実装と完全一致。
 ===================================================================== */
 
 const _G = (() => {
@@ -41,21 +40,17 @@ const _G = (() => {
    § 1. 定数
 ==================================================================== */
 
-const BASE_URL        = 'https://generativelanguage.googleapis.com/v1beta';
+const BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
 
 // ── モデルキャッシュ ──────────────────────────────────────────────────
 const MODEL_CACHE_KEY = 'gemini_model_v3';
-const MODEL_CACHE_TTL = 24 * 60 * 60 * 1000;       // 24時間（ミリ秒）
+const MODEL_CACHE_TTL = 24 * 60 * 60 * 1000;        // 24時間（ミリ秒）
 
 // ── responseMimeType 非対応フラグキャッシュ ───────────────────────────
 const NO_MIME_CACHE_KEY = 'gemini_no_mime_v1';
-const NO_MIME_CACHE_TTL = 7 * 24 * 60 * 60 * 1000; // 7日間（ミリ秒）
-// 【TTL を 7 日間に設定した理由】
-// Google は Gemini モデルの API サポート仕様をおおむね数週間〜数ヶ月単位で
-// 更新する。7 日ごとに再挑戦することで、モデルが responseMimeType に対応
-// した際に自動的に高品質モードへ復帰できる。
+const NO_MIME_CACHE_TTL = 7 * 24 * 60 * 60 * 1000;  // 7日間（ミリ秒）
 
-// ── 優先モデルとフォールバックリスト ─────────────────────────────────
+// ── resolveModel() 用優先モデル・フォールバックリスト ─────────────────
 const PREFERRED_MODEL = 'gemini-2.5-flash';
 const FALLBACK_MODELS = [
   'gemini-2.5-flash',
@@ -67,8 +62,19 @@ const FALLBACK_MODELS = [
   'gemini-1.0-pro'
 ];
 
+// ── 429レート制限時のフォールバックチェーン（v5.0 新規追加）────────────
+// 各モデルの無料枠 RPD: gemini-2.5-flash=20, gemini-2.5-flash-lite=20,
+//                       gemini-3.1-flash-lite-preview=500
+// → RPD が最も大きい gemini-3.1-flash-lite-preview を最終砦に配置する。
+const FALLBACK_MODEL_CHAIN = [
+  'gemini-2.5-flash',             // プライマリ
+  'gemini-2.5-flash-lite',        // 第1フォールバック（同世代・同品質）
+  'gemini-3.1-flash-lite-preview' // 第2フォールバック（RPD500・最終砦）
+];
+
 // ── レベル別設定 ──────────────────────────────────────────────────────
-// lines: 線分数 / gridN: 座標最大値 / lo,hi: 交差数範囲 / hints: ヒント本数
+// lines: 線分数 / gridN: 座標最大値(=グリッドサイズ-1) /
+// lo,hi: 許容交差数範囲 / hints: ヒント本数
 const LEVEL_CFG = {
   0: { lines: 4, gridN: 3, lo: 0, hi: 2, hints: 3 },
   1: { lines: 4, gridN: 3, lo: 0, hi: 3, hints: 2 },
@@ -83,6 +89,12 @@ const LEVEL_CFG = {
 /**
  * 2線分 AB と CD が厳密に内部で交差するか判定する。
  * 端点共有・端点が相手の線分上にある場合は false。
+ *
+ * @param {number} ax @param {number} ay  線分ABの始点
+ * @param {number} bx @param {number} by  線分ABの終点
+ * @param {number} cx @param {number} cy  線分CDの始点
+ * @param {number} dx @param {number} dy  線分CDの終点
+ * @returns {boolean}
  */
 function _cross(ax, ay, bx, by, cx, cy, dx, dy) {
   if ((ax === cx && ay === cy) || (ax === dx && ay === dy)) return false;
@@ -99,7 +111,7 @@ function _cross(ax, ay, bx, by, cx, cy, dx, dy) {
 
 /**
  * 線分配列内の全ペアについて厳密内部交差数を返す。
- * @param {Array<{x1,y1,x2,y2}>} lines
+ * @param {Array<{x1:number,y1:number,x2:number,y2:number}>} lines
  * @returns {number}
  */
 function _countCross(lines) {
@@ -119,13 +131,12 @@ function _countCross(lines) {
 
 /**
  * 問題オブジェクトがレベルの交差数制約を満たすか確認する。
- * @param {Object} problem
- * @param {number} level
+ * @param {Object} problem - { lines: Array }
+ * @param {Object} cfg     - LEVEL_CFG の1エントリ
  * @returns {boolean}
  */
-function _validate(problem, level) {
-  const cfg = LEVEL_CFG[level] || LEVEL_CFG[1];
-  const n   = _countCross(problem.lines);
+function _validate(problem, cfg) {
+  const n = _countCross(problem.lines);
   return n >= cfg.lo && n <= cfg.hi;
 }
 
@@ -143,10 +154,10 @@ function _validate(problem, level) {
  * @returns {Object|null}
  */
 function _normalise(raw, level) {
-  const cfg  = LEVEL_CFG[level] || LEVEL_CFG[1];
+  const cfg  = LEVEL_CFG[level] ?? LEVEL_CFG[1];
   const maxC = cfg.gridN;
 
-  // 座標を [0, maxC] の整数に丸めるクランプ関数
+  // 座標を [0, maxC] の整数にクランプ
   const clamp = v => Math.max(0, Math.min(maxC, Math.round(Number(v) || 0)));
 
   const lines = (raw.lines || [])
@@ -162,7 +173,7 @@ function _normalise(raw, level) {
   if (lines.length !== cfg.lines) return null;
 
   // ヒント線は先頭 cfg.hints 本の線分オブジェクトをそのまま使用
-  // （数値インデックスではなくオブジェクト配列にすることで
+  // （数値インデックス配列ではなくオブジェクト配列にすることで
   //   canvas.js の drawLine() / app.js の judgeAnswer() と型が一致する）
   const hintLines = lines.slice(0, cfg.hints);
 
@@ -186,7 +197,7 @@ function _normalise(raw, level) {
  *   A. JSON がオブジェクトラッパーに包まれている → 内側の配列を取り出す
  *   B. 複数の JSON ブロックが混在 → 最も長い配列ブロックを選ぶ
  *   C. 座標値が文字列で返る → _normalise の clamp で吸収
- *   D. 交差数が仕様外 → _validate でフィルタ
+ *   D. 改行区切り個別オブジェクト → 行ごとにパースして収集
  *
  * @param {string} text
  * @returns {Array|null}
@@ -202,7 +213,6 @@ function _extractJsonArray(text) {
 
   // ── ステップ3: 最も長い配列文字列を優先してパース試行 ────────────
   candidates.sort((a, b) => b.length - a.length);
-
   for (const candidate of candidates) {
     try {
       const parsed = JSON.parse(candidate);
@@ -213,10 +223,9 @@ function _extractJsonArray(text) {
     } catch (_) { /* 次の候補へ */ }
   }
 
-  // ── ステップ4: パターンA対応（オブジェクトラッパー）────────────────
+  // ── ステップ4: パターンA（オブジェクトラッパー）────────────────────
   const objCandidates = _extractAllObjectStrings(stripped);
   objCandidates.sort((a, b) => b.length - a.length);
-
   for (const candidate of objCandidates) {
     try {
       const parsed = JSON.parse(candidate);
@@ -232,7 +241,7 @@ function _extractJsonArray(text) {
     } catch (_) { /* 次の候補へ */ }
   }
 
-  // ── ステップ5: パターンB対応（改行区切り個別オブジェクト）──────────
+  // ── ステップ5: パターンB（改行区切り個別オブジェクト）──────────────
   const lineObjects = [];
   for (const line of stripped.split('\n')) {
     const trimmed = line.trim();
@@ -305,7 +314,6 @@ function _extractAllObjectStrings(text) {
 /**
  * 指定モデルが responseMimeType 非対応としてキャッシュされているか確認する。
  * TTL（7日）を超えたエントリは自動削除して false を返す。
- *
  * @param {string} model
  * @returns {boolean}
  */
@@ -320,7 +328,9 @@ function _isNoMimeCached(model) {
     if (!isValid) {
       delete cache[model];
       localStorage.setItem(NO_MIME_CACHE_KEY, JSON.stringify(cache));
-      console.log(`[gemini] responseMimeType 非対応フラグ期限切れ（${model}）→ 再挑戦します`);
+      console.log(
+        `[gemini] responseMimeType 非対応フラグ期限切れ（${model}）→ 再挑戦します`
+      );
     }
     return isValid;
   } catch (_) { return false; }
@@ -336,7 +346,8 @@ function _setNoMimeCache(model) {
     const cache = raw ? JSON.parse(raw) : {};
     cache[model] = { ts: Date.now() };
     localStorage.setItem(NO_MIME_CACHE_KEY, JSON.stringify(cache));
-    const retryDate = new Date(Date.now() + NO_MIME_CACHE_TTL).toLocaleDateString('ja-JP');
+    const retryDate = new Date(Date.now() + NO_MIME_CACHE_TTL)
+      .toLocaleDateString('ja-JP');
     console.log(
       `[gemini] ${model} を responseMimeType 非対応としてキャッシュ。` +
       `${retryDate} 以降に自動再挑戦します。`
@@ -388,7 +399,10 @@ function _loadCachedModel() {
  */
 function _saveModel(model) {
   try {
-    localStorage.setItem(MODEL_CACHE_KEY, JSON.stringify({ model, ts: Date.now() }));
+    localStorage.setItem(
+      MODEL_CACHE_KEY,
+      JSON.stringify({ model, ts: Date.now() })
+    );
   } catch (_) {}
 }
 
@@ -438,36 +452,33 @@ async function _probeModel(model, apiKey) {
 
 /**
  * Gemini API の /models エンドポイントから generateContent 対応モデル一覧を取得する。
- *
- * 【v4.1 修正】AbortController で 8 秒タイムアウトを追加。
- * 旧版ではタイムアウトがなく、ネットワーク不安定時に resolveModel() が
- * ここで無制限に停止し「AIが問題を作っています…」で永久フリーズしていた。
- * 修正後はタイムアウト・エラー時に null を返してフォールバックへ移行する。
+ * AbortController で 8 秒タイムアウトを設定。タイムアウト・エラー時は null を返す。
  *
  * @param {string} apiKey
  * @returns {Promise<string[]|null>}
  */
 async function _fetchAvailableModels(apiKey) {
-  // ── タイムアウト設定（8秒）────────────────────────────────────────
-  // _probeModel の 5 秒より長くすることで、モデル一覧 API が
-  // 少し遅くても取得を試みつつ、無限待機は防ぐ。
   const ctrl = new AbortController();
   const tid  = setTimeout(() => ctrl.abort(), 8000);
   try {
     const r = await fetch(
       `${BASE_URL}/models?key=${encodeURIComponent(apiKey)}`,
-      { signal: ctrl.signal }  // ← v4.1 追加: タイムアウトシグナルを渡す
+      { signal: ctrl.signal }
     );
     clearTimeout(tid);
     if (!r.ok) return null;
     const data = await r.json();
     return (data.models || [])
-      .filter(m => (m.supportedGenerationMethods || []).includes('generateContent'))
+      .filter(m =>
+        (m.supportedGenerationMethods || []).includes('generateContent')
+      )
       .map(m => m.name.replace('models/', ''));
   } catch (_) {
-    // タイムアウト（AbortError）またはネットワークエラー → null でフォールバック
     clearTimeout(tid);
-    console.warn('[gemini] モデル一覧の取得がタイムアウトまたは失敗しました。フォールバックリストを使用します。');
+    console.warn(
+      '[gemini] モデル一覧の取得がタイムアウトまたは失敗しました。' +
+      'フォールバックリストを使用します。'
+    );
     return null;
   }
 }
@@ -479,7 +490,7 @@ async function _fetchAvailableModels(apiKey) {
  *   3. API からモデル一覧を取得して既知リストと照合（8秒タイムアウト付き）
  *   4. 上位 3 モデルを並列プローブ → 最速で成功したものを採用
  *   5. 残りを直列プローブ
- *   6. 全滅した場合は 'gemini-2.0-flash' をデフォルトとして返す
+ *   6. 全滅した場合は 'gemini-2.5-flash' をデフォルトとして返す
  *
  * @param {string} apiKey
  * @returns {Promise<string>}
@@ -498,16 +509,18 @@ async function resolveModel(apiKey) {
     return PREFERRED_MODEL;
   }
 
-  // v4.1: _fetchAvailableModels は 8 秒タイムアウト付きになったため
-  //       ここで無限待機することはなくなった
   const available  = await _fetchAvailableModels(apiKey);
   let   candidates = FALLBACK_MODELS.slice();
   if (available) {
     const apiSet = new Set(available);
     const known  = candidates.filter(m => apiSet.has(m));
-    const extra  = available.filter(m => !candidates.includes(m) && m.startsWith('gemini'));
-    candidates   = [...known, ...extra];
-    console.log(`[gemini] API取得候補: ${candidates.slice(0, 5).join(', ')}…`);
+    const extra  = available.filter(
+      m => !candidates.includes(m) && m.startsWith('gemini')
+    );
+    candidates = [...known, ...extra];
+    console.log(
+      `[gemini] API取得候補: ${candidates.slice(0, 5).join(', ')}…`
+    );
   }
 
   const top3   = candidates.slice(0, 3);
@@ -528,8 +541,11 @@ async function resolveModel(apiKey) {
     }
   }
 
-  console.warn('[gemini] 使用可能なモデルが見つかりません。gemini-2.0-flash をデフォルト使用');
-  return 'gemini-2.0-flash';
+  console.warn(
+    '[gemini] 使用可能なモデルが見つかりません。' +
+    `${FALLBACK_MODEL_CHAIN[0]} をデフォルト使用`
+  );
+  return FALLBACK_MODEL_CHAIN[0];
 }
 
 /* ====================================================================
@@ -545,7 +561,7 @@ async function resolveModel(apiKey) {
  * @returns {string}
  */
 function _buildPrompt(level, count) {
-  const cfg = LEVEL_CFG[level] || LEVEL_CFG[1];
+  const cfg = LEVEL_CFG[level] ?? LEVEL_CFG[1];
   const { lines: lineCount, gridN, lo, hi } = cfg;
 
   return `You are generating line puzzle problems for a visual math game.
@@ -637,7 +653,7 @@ function _getFallback(level, count) {
     [pool[i], pool[j]] = [pool[j], pool[i]];
   }
 
-  const cfg = LEVEL_CFG[level] || LEVEL_CFG[1];
+  const cfg = LEVEL_CFG[level] ?? LEVEL_CFG[1];
   return pool.slice(0, count).map(p => ({
     level,
     grid:      { cols: cfg.gridN + 1, rows: cfg.gridN + 1 },
@@ -650,6 +666,21 @@ function _getFallback(level, count) {
    § 11. API 送信コア（responseMimeType 自動切替 + fetchタイムアウト）
 ==================================================================== */
 
+/**
+ * 指定モデルに問題生成リクエストを送り、{ raw, status } を返す。
+ *
+ * - JSON モード: responseMimeType = 'application/json' を付与して送信。
+ *   HTTP 400 が返った場合、そのモデルを非対応としてキャッシュし
+ *   テキストモードで即時リトライ（forcePlain = true）。
+ * - テキストモード: _extractJsonArray() でレスポンスから配列を抽出。
+ * - 30 秒 fetchタイムアウト: AbortController を使用。
+ *
+ * @param {string}  model
+ * @param {string}  apiKey
+ * @param {string}  prompt
+ * @param {boolean} [forcePlain=false] - true のときテキストモード強制
+ * @returns {Promise<{raw: Array|null, status: number}>}
+ */
 async function _callApi(model, apiKey, prompt, forcePlain = false) {
   const generationConfig = {
     temperature:     0.7,
@@ -662,9 +693,11 @@ async function _callApi(model, apiKey, prompt, forcePlain = false) {
   }
 
   console.log(
-    `[gemini] 送信モード: ${useJsonMode ? 'JSON (responseMimeType あり)' : 'テキスト（抽出パース）'}`
+    `[gemini] _callApi: ${model} / ` +
+    `モード: ${useJsonMode ? 'JSON' : 'テキスト（抽出パース）'}`
   );
 
+  // ── 30秒 fetchタイムアウト ────────────────────────────────────────
   const ctrl = new AbortController();
   const tid  = setTimeout(() => ctrl.abort(), 30000);
 
@@ -686,23 +719,30 @@ async function _callApi(model, apiKey, prompt, forcePlain = false) {
   } catch (e) {
     clearTimeout(tid);
     const isTimeout = e.name === 'AbortError';
-    console.error(`[gemini] fetch ${isTimeout ? 'タイムアウト(30秒)' : '失敗'}: ${e.message}`);
+    console.error(
+      `[gemini] fetch ${isTimeout ? 'タイムアウト(30秒)' : '失敗'}: ${e.message}`
+    );
     return { raw: null, status: isTimeout ? 408 : 0 };
   }
 
   const status = resp.status;
 
+  // ── HTTP 400: responseMimeType 非対応 → テキストモードで即時リトライ
   if (status === 400 && !forcePlain) {
-    console.warn(`[gemini] HTTP 400 → ${model} は responseMimeType 非対応と判定`);
+    console.warn(
+      `[gemini] HTTP 400 → ${model} は responseMimeType 非対応と判定。` +
+      'テキストモードで再送します。'
+    );
     _setNoMimeCache(model);
     return _callApi(model, apiKey, prompt, true);
   }
 
   if (!resp.ok) {
-    console.warn(`[gemini] HTTP ${status} エラー`);
+    console.warn(`[gemini] HTTP ${status} エラー (${model})`);
     return { raw: null, status };
   }
 
+  // ── レスポンス JSON パース ────────────────────────────────────────
   let data;
   try {
     data = await resp.json();
@@ -713,6 +753,7 @@ async function _callApi(model, apiKey, prompt, forcePlain = false) {
 
   const text = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
 
+  // ── 問題配列の抽出 ────────────────────────────────────────────────
   let raw;
   if (useJsonMode) {
     try {
@@ -729,103 +770,178 @@ async function _callApi(model, apiKey, prompt, forcePlain = false) {
 }
 
 /* ====================================================================
-   § 12. 問題生成メイン（公開 API）
+   § 12. パース・バリデーションヘルパー（内部使用）
 ==================================================================== */
 
+/**
+ * _callApi の raw レスポンスから問題配列を正規化・検証して返す。
+ * 条件を満たさない場合は null を返す。
+ *
+ * @param {{raw: Array|null, status: number}} result - _callApi の戻り値
+ * @param {number} level
+ * @param {number} count
+ * @param {Object} cfg   - LEVEL_CFG の1エントリ
+ * @returns {Array|null} count 件の検証済み問題配列、または null
+ */
+function _extractAndValidate(result, level, count, cfg) {
+  const { raw } = result;
+  if (!Array.isArray(raw) || raw.length === 0) return null;
+
+  const validated = [];
+  for (const item of raw) {
+    if (validated.length >= count) break;
+    const p = _normalise(item, level);
+    if (!p) {
+      console.warn('[gemini] _normalise 失敗（線分数不一致または無効）');
+      continue;
+    }
+    if (!_validate(p, cfg)) {
+      const n = _countCross(p.lines);
+      console.warn(
+        `[gemini] 交差数制約違反: ${n} (要求: ${cfg.lo}–${cfg.hi})`
+      );
+      continue;
+    }
+    validated.push(p);
+  }
+
+  return validated.length >= count ? validated.slice(0, count) : null;
+}
+
+/* ====================================================================
+   § 13. 問題生成メイン（公開 API）
+==================================================================== */
+
+/**
+ * 指定レベルの問題を count 件生成して返す。
+ *
+ * フォールバックチェーン（v5.0 追加）:
+ *   FALLBACK_MODEL_CHAIN を順番に試みる。
+ *   各モデルで 429 が MAX_429_PER_MODEL 回を超えたら次モデルへ移行。
+ *   全モデル失敗時は _getFallback() でローカルBANKを返す。
+ *
+ * @param {number} level
+ * @param {number} count
+ * @param {string} apiKey
+ * @returns {Promise<Array>}
+ */
 async function generateProblems(level, count, apiKey) {
   if (!apiKey) {
     console.log('[gemini] APIキー未設定 → フォールバック問題を使用');
     return _getFallback(level, count);
   }
 
-  const model  = await resolveModel(apiKey);
+  const cfg    = LEVEL_CFG[level] ?? LEVEL_CFG[1];
   const prompt = _buildPrompt(level, count);
-  console.log(`[gemini] 使用モデル: ${model} / レベル: ${level} / 要求数: ${count}`);
 
-  const MAX_ATTEMPTS  = 5;
-  const MAX_RETRY_429 = 3;
-  const validated     = [];
-  let   retry429Count = 0;
+  const MAX_ATTEMPTS_PER_MODEL = 5;  // 1モデルあたりの最大生成試行数
+  const MAX_429_PER_MODEL      = 1;  // 1モデルあたりの429許容回数
 
-  for (let attempt = 0; attempt < MAX_ATTEMPTS && validated.length < count; attempt++) {
-    console.log(`[gemini] 試行 ${attempt + 1} / ${MAX_ATTEMPTS}`);
+  // ── モデルチェーンを順番に試みる ──────────────────────────────────
+  for (let mi = 0; mi < FALLBACK_MODEL_CHAIN.length; mi++) {
+    const model = FALLBACK_MODEL_CHAIN[mi];
+    let attempt429 = 0;
 
-    const { raw, status } = await _callApi(model, apiKey, prompt);
+    console.log(
+      `[gemini] モデルチェーン[${mi}]: ${model} を使用 ` +
+      `(レベル:${level} / 要求:${count}件)`
+    );
 
-    if (status === 429) {
-      retry429Count++;
-      if (retry429Count > MAX_RETRY_429) {
-        console.warn(`[gemini] 429 リトライ上限（${MAX_RETRY_429}回）超過 → フォールバックへ移行`);
-        break;
-      }
-      const backoff = Math.min(2000 * Math.pow(2, retry429Count - 1), 30000);
-      const wait    = backoff + Math.random() * 1000;
-      console.warn(`[gemini] 429 レート制限（${retry429Count}回目）→ ${Math.round(wait)}ms 後にリトライ`);
-      await new Promise(r => setTimeout(r, wait));
-      attempt--;
-      continue;
-    }
+    for (let attempt = 0; attempt < MAX_ATTEMPTS_PER_MODEL; attempt++) {
+      console.log(
+        `[gemini] 試行 ${attempt + 1}/${MAX_ATTEMPTS_PER_MODEL} (${model})`
+      );
 
-    if (status === 403 || status === 401) {
-      clearModelCache();
-      throw new Error(`認証エラー (HTTP ${status})。APIキーを確認してください。`);
-    }
+      const result = await _callApi(model, apiKey, prompt);
+      const { status } = result;
 
-    if (status === 408 || status === 0) {
-      console.warn(`[gemini] 試行 ${attempt + 1}: タイムアウトまたはネットワークエラー → 次の試行へ`);
-      continue;
-    }
-
-    if (!raw) {
-      console.warn(`[gemini] 試行 ${attempt + 1}: レスポンスから問題を抽出できませんでした`);
-      continue;
-    }
-
-    let newCount = 0;
-    for (const item of raw) {
-      if (validated.length >= count) break;
-      const p = _normalise(item, level);
-      if (!p) continue;
-      if (!_validate(p, level)) {
-        const n = _countCross(p.lines);
-        const { lo, hi } = LEVEL_CFG[level];
-        console.warn(`[gemini] 交差数 ${n} が範囲外 [${lo},${hi}] → スキップ`);
+      // ── 429 レート制限 ─────────────────────────────────────────────
+      if (status === 429) {
+        attempt429++;
+        if (attempt429 >= MAX_429_PER_MODEL) {
+          console.warn(
+            `[gemini] ${model}: 429 上限(${MAX_429_PER_MODEL}回)到達 ` +
+            `→ 次モデルへ`
+          );
+          break; // 内側ループを抜けて次モデルへ
+        }
+        // 指数バックオフ（2s → 4s, jitter付き, 最大15s）
+        const backoff = Math.min(2000 * Math.pow(2, attempt429 - 1), 15000);
+        const wait    = backoff + Math.random() * 1000;
+        console.warn(
+          `[gemini] 429 backoff: ${Math.round(wait)}ms (${model} ` +
+          `${attempt429}/${MAX_429_PER_MODEL}回目)`
+        );
+        await new Promise(r => setTimeout(r, wait));
+        attempt--; // 試行カウントを消費しない
         continue;
       }
-      validated.push(p);
-      newCount++;
-    }
-    console.log(
-      `[gemini] 試行 ${attempt + 1}: ${newCount} 問取得 / 累計 ${validated.length} / 必要 ${count}`
+
+      // ── 401 / 403: 認証エラー → 即座にフォールバックへ ──────────
+      if (status === 401 || status === 403) {
+        console.error(
+          `[gemini] 認証エラー (HTTP ${status}) → フォールバックBANKへ`
+        );
+        clearModelCache();
+        return _getFallback(level, count);
+      }
+
+      // ── 408 / 0: タイムアウト / ネットワークエラー ───────────────
+      if (status === 408 || status === 0) {
+        console.warn(
+          `[gemini] タイムアウト/ネットワークエラー ` +
+          `(${model} 試行${attempt + 1}) → 次試行へ`
+        );
+        continue;
+      }
+
+      // ── 正常レスポンス → パース・バリデーション ──────────────────
+      const problems = _extractAndValidate(result, level, count, cfg);
+      if (problems) {
+        console.log(
+          `[gemini] 問題生成成功: ${model} ` +
+          `(試行${attempt + 1}/${MAX_ATTEMPTS_PER_MODEL})`
+        );
+        return problems;
+      }
+
+      console.warn(
+        `[gemini] パース/バリデーション失敗 ` +
+        `(${model} 試行${attempt + 1}) → 次試行へ`
+      );
+
+    } // end inner for (attempt)
+
+    console.warn(
+      `[gemini] ${model}: 全試行失敗 ` +
+      `→ チェーン[${mi + 1}]${FALLBACK_MODEL_CHAIN[mi + 1] ? ` (${FALLBACK_MODEL_CHAIN[mi + 1]})` : ' (なし)'} へ`
     );
-  }
 
-  if (validated.length < count) {
-    const need = count - validated.length;
-    console.warn(`[gemini] ${need} 問不足 → フォールバック問題で補填します`);
-    validated.push(..._getFallback(level, need));
-  }
+  } // end outer for (mi)
 
-  console.log(`[gemini] 最終: ${validated.length} 問を返します`);
-  return validated;
+  // ── 全モデル失敗 → ローカルBANKフォールバック ────────────────────
+  console.warn('[gemini] 全モデル失敗 → _getFallback() を使用します');
+  return _getFallback(level, count);
 }
 
-   
 /* ====================================================================
-   § 13. APIキー管理（公開 API）
+   § 14. APIキー管理（公開 API）
 ==================================================================== */
 
 /**
  * APIキーを localStorage に保存する。
- * キー変更時はモデルキャッシュと noMime フラグを同時にクリアする。
+ * キー変更時はモデルキャッシュと no-mime フラグを同時にクリアする。
  * @param {string} key
  */
 function saveApiKey(key) {
   try {
+    const prev = localStorage.getItem('gemini_api_key');
+    if (prev !== key) {
+      clearModelCache();
+      _clearNoMimeCache();
+      console.log('[gemini] APIキー変更を検出: モデルキャッシュをリセットしました');
+    }
     localStorage.setItem('gemini_api_key', key);
-    clearModelCache();       // モデルキャッシュをクリア
-    _clearNoMimeCache();     // noMime フラグを全クリア
-    console.log('[gemini] APIキーを保存しました。キャッシュをクリアしました。');
   } catch (_) {}
 }
 
@@ -838,10 +954,9 @@ function loadApiKey() {
 }
 
 /* ====================================================================
-   § 14. モジュールエクスポート
+   § 15. モジュールエクスポート
 ==================================================================== */
 
-// IIFE の戻り値として公開 API をまとめて返す
 return {
   generateProblems,
   resolveModel,
@@ -850,8 +965,7 @@ return {
   clearModelCache
 };
 
-})(); // IIFE 終了
+})(); // end _G IIFE
 
-// グローバルスコープへの展開
-// app.js が generateProblems() 等を直接呼べるようにする
+// ── グローバル公開（index.html から直接参照できるようにする）────────
 const { generateProblems, resolveModel, saveApiKey, loadApiKey, clearModelCache } = _G;
