@@ -454,25 +454,35 @@ function _buildPrompt(level, count) {
   const cfg = LEVEL_CFG[level] ?? LEVEL_CFG[1];
   const { lines: lineCount, gridN, lo, hi } = cfg;
 
-  return `You are generating line puzzle problems for a visual math game.
+  return `You are generating line puzzle problems for a visual math game for young children.
 
 Rules:
 - Each problem has exactly ${lineCount} line segments on a ${gridN + 1}x${gridN + 1} grid.
 - All coordinates are integers in the range [0, ${gridN}] (inclusive).
 - No zero-length lines (x1==x2 AND y1==y2 is forbidden).
-- Each line segment must be unique. No two segments may share identical endpoints, even if the order of endpoints is reversed (i.e., {x1,y1,x2,y2} and {x2,y2,x1,y1} are considered the same and duplicates are forbidden).
+- Each line segment must be VISUALLY DISTINCT. Two segments must NOT overlap in any way:
+  (a) Identical endpoints (even reversed): {x1,y1,x2,y2} == {x2,y2,x1,y1} is forbidden.
+  (b) Collinear overlap: if two segments lie on the same infinite line AND share any common
+      region (one segment fully or partially contains the other), that is forbidden.
+      Example of FORBIDDEN collinear overlap:
+        Segment A: (0,0)-(3,3), Segment B: (1,1)-(2,2)  ← B is inside A, FORBIDDEN
+        Segment A: (0,0)-(2,2), Segment B: (1,1)-(3,3)  ← A and B partially overlap, FORBIDDEN
+      Example of ALLOWED collinear non-overlap:
+        Segment A: (0,0)-(1,1), Segment B: (2,2)-(3,3)  ← same direction but no shared region, OK
 - The number of STRICT INTERNAL intersections must be between ${lo} and ${hi} (inclusive).
   - "Strict internal" means two segments cross at a point that is interior to BOTH segments.
   - Shared endpoints do NOT count as intersections.
   - A point touching only one segment's endpoint does NOT count.
 - Generate exactly ${count} distinct problems.
 
-Self-check before outputting:
-1. For every pair of lines, confirm they are not identical (including reversed direction).
-2. For every pair of lines, determine if they strictly internally intersect.
-3. Count the total intersections for the problem.
-4. Confirm the count is in [${lo}, ${hi}].
-5. If any check fails, adjust the lines and recheck.
+Self-check before outputting each problem:
+1. For every pair of segments (A, B):
+   a. Confirm they do not have identical endpoints (including reversed).
+   b. Check if A and B are collinear (lie on the same infinite line).
+      If collinear, confirm they share NO common point or region.
+2. Count the total STRICT INTERNAL intersections.
+3. Confirm the count is in [${lo}, ${hi}].
+4. If any check fails, redesign the problem and recheck from step 1.
 
 Output ONLY a JSON array, no markdown, no explanation:
 [
