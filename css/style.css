@@ -20,7 +20,7 @@
   --radius:    16px;
   --font:      'M PLUS Rounded 1c', 'Kosugi Maru', sans-serif;
 
-  /* ★ グリッドヘッダーサイズ: 2倍に拡大 */
+  /* グリッドヘッダーサイズ（JS の syncRowHeaderHeight も参照） */
   --header-size: 56px;
 }
 
@@ -79,28 +79,32 @@ button:active { transform: scale(.95); }
   transform: translateY(-2px);
 }
 
-/* ===== action-row ボタン: 1.5倍サイズ ===== */
+/*
+ * ★ action-row 内ボタン: 1.5倍サイズ
+ *    padding を em 単位にして文字サイズに追従させることで
+ *    「こたえあわせ」が見切れる問題を解消
+ */
 .btn-primary {
-  padding: 18px 54px;
+  padding: 0.55em 1.6em;
   font-size: 1.65rem;
   font-weight: 700;
   color: #fff;
   background: linear-gradient(135deg, var(--primary), var(--primary2));
   border-radius: 50px;
   box-shadow: 0 4px 12px rgba(255,107,107,.4);
-  white-space: nowrap;           /* ★ 折り返し禁止 */
+  white-space: nowrap;
 }
 .btn-primary:hover { transform: translateY(-1px); }
 
 .btn-sub {
-  padding: 15px 36px;
+  padding: 0.5em 1.4em;
   font-size: 1.5rem;
   font-weight: 700;
   color: var(--text-main);
   background: #EEF3FB;
   border-radius: 50px;
   box-shadow: 0 2px 8px rgba(0,0,0,.08);
-  white-space: nowrap;           /* ★ 折り返し禁止 */
+  white-space: nowrap;
 }
 .btn-sub:hover { background: #DDE8F5; }
 
@@ -250,7 +254,6 @@ button:active { transform: scale(.95); }
   top: 0;
   z-index: 10;
   align-self: stretch;
-  max-width: 100%;
 }
 
 .progress-area {
@@ -285,7 +288,7 @@ button:active { transform: scale(.95); }
 
 .game-main {
   width: 100%;
-  max-width: 1000px;           /* ★ ヘッダー拡大分に対応して少し広げる */
+  max-width: 1000px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -296,7 +299,7 @@ button:active { transform: scale(.95); }
 
 .problem-row {
   display: flex;
-  gap: 24px;                   /* ★ パネル間余白を少し広げる */
+  gap: 24px;
   width: 100%;
   justify-content: center;
 }
@@ -328,6 +331,7 @@ button:active { transform: scale(.95); }
 /* 列ヘッダー（数字）横一列 */
 .col-header {
   display: flex;
+  /* 行ヘッダー幅（--header-size）分だけ左をオフセット */
   padding-left: var(--header-size);
   width: 100%;
   margin-bottom: 2px;
@@ -336,7 +340,10 @@ button:active { transform: scale(.95); }
 .col-header-cell {
   flex: 1;
   text-align: center;
-  /* ★ フォントサイズを2倍に拡大 */
+  /*
+   * フォントサイズは JS の syncColHeaderFontSize() が
+   * インラインスタイルで上書きするため、ここは初期値のみ設定
+   */
   font-size: 1.4rem;
   font-weight: 800;
   color: #5588CC;
@@ -364,7 +371,10 @@ button:active { transform: scale(.95); }
   display: flex;
   align-items: center;
   justify-content: center;
-  /* ★ 絵文字サイズを2倍に拡大 */
+  /*
+   * フォントサイズ・高さは JS の syncRowHeaderHeight() が
+   * インラインスタイルで上書きするため、ここは初期値のみ設定
+   */
   font-size: 1.8rem;
   line-height: 1;
 }
@@ -402,29 +412,27 @@ button:active { transform: scale(.95); }
   padding: 10px 28px;
   border-radius: 20px;
   text-align: center;
+  white-space: nowrap;
 }
 
 /* ===== アクションボタン行 ===== */
 .action-row {
   display: flex;
-  gap: 16px;
+  gap: 12px;
   align-items: center;
-  /* ★ flex-wrap をやめて横1行に固定 → 見切れ防止 */
+  /* 横1行固定。万が一はみ出す場合はスクロール可能にする */
   flex-wrap: nowrap;
   justify-content: center;
   width: 100%;
-  padding: 0 8px;
+  padding: 0;
+  overflow-x: auto;
 }
 
-/*
- * ★ action-row 内ボタン
- *    max-width 制限を撤廃し、テキストが収まるサイズを保証
- *    flex-shrink:0 で縮まないようにする
- */
+/* action-row 内ボタン共通: 縮まない・折り返さない */
 .action-row .btn-sub,
 .action-row .btn-primary {
-  flex: 0 0 auto;              /* ★ shrink/grow させない */
-  white-space: nowrap;         /* ★ テキスト折り返し禁止 */
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 /* ===== FEEDBACK OVERLAY ===== */
@@ -574,12 +582,10 @@ button:active { transform: scale(.95); }
 /* ===== Responsive — タブレット (601px〜900px) ===== */
 @media (min-width: 601px) and (max-width: 900px) {
   :root { --header-size: 44px; }
-  .col-header-cell { font-size: 1.1rem; }
-  .row-header-cell { font-size: 1.4rem; }
   .problem-row { gap: 16px; }
-  /* タブレットでもボタンが1行に収まるよう調整 */
-  .action-row .btn-sub    { font-size: 1.25rem; padding: 13px 24px; }
-  .action-row .btn-primary { font-size: 1.35rem; padding: 15px 32px; }
+  .action-row { gap: 10px; }
+  .action-row .btn-sub    { font-size: 1.25rem; }
+  .action-row .btn-primary { font-size: 1.35rem; }
 }
 
 /* ===== Responsive — スマートフォン (〜600px) ===== */
@@ -602,7 +608,7 @@ button:active { transform: scale(.95); }
     max-width: 380px;
   }
 
-  /* ヘッダー */
+  /* ゲームヘッダー */
   .game-header { padding: 8px 12px; gap: 8px; }
   #progress-text { font-size: .75rem; }
   .score-area { font-size: .9rem; }
@@ -610,18 +616,16 @@ button:active { transform: scale(.95); }
   /* メイン余白 */
   .game-main { padding: 8px 8px 24px; gap: 10px; }
 
-  /* グリッドヘッダー: スマホでは少し縮める */
+  /* グリッドヘッダー */
   :root { --header-size: 36px; }
-  .col-header-cell { font-size: .95rem; }
-  .row-header-cell { font-size: 1.3rem; }
 
-  /* アクションボタン: スマホでは少し縮めつつ1行維持 */
-  .action-row {
-    gap: 6px;
-    padding: 0 4px;
-  }
-  .action-row .btn-sub    { font-size: 1rem;  padding: 10px 14px; }
-  .action-row .btn-primary { font-size: 1.05rem; padding: 11px 18px; }
+  /* アクションボタン */
+  .action-row { gap: 6px; }
+  .action-row .btn-sub    { font-size: 1rem;    padding: 0.5em 1em; }
+  .action-row .btn-primary { font-size: 1.05rem; padding: 0.5em 1.1em; }
+
+  /* ヒントメッセージ */
+  .hint-msg { font-size: 1rem; padding: 8px 16px; white-space: normal; }
 
   /* フィードバック */
   #canvas-wrong { max-width: 220px; }
@@ -639,8 +643,7 @@ button:active { transform: scale(.95); }
 @media (max-width: 360px) {
   .start-title { font-size: 1.3rem; }
   :root { --header-size: 28px; }
-  .col-header-cell { font-size: .75rem; }
-  .row-header-cell { font-size: 1.1rem; }
-  .action-row .btn-sub    { font-size: .85rem; padding: 8px 10px; }
-  .action-row .btn-primary { font-size: .9rem;  padding: 9px 12px; }
+  .action-row { gap: 4px; }
+  .action-row .btn-sub    { font-size: .85rem; padding: 0.45em 0.8em; }
+  .action-row .btn-primary { font-size: .9rem;  padding: 0.45em 0.9em; }
 }
