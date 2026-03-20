@@ -19,6 +19,9 @@
   --shadow:    0 4px 16px rgba(0,0,0,.10);
   --radius:    16px;
   --font:      'M PLUS Rounded 1c', 'Kosugi Maru', sans-serif;
+
+  /* グリッドヘッダーサイズ */
+  --header-size: 28px;
 }
 
 html {
@@ -26,7 +29,6 @@ html {
   font-family: var(--font);
   background: var(--bg);
   color: var(--text-main);
-  /* overflow: hidden を削除 → スクロール可能にする */
 }
 
 body {
@@ -34,15 +36,14 @@ body {
   font-family: var(--font);
   background: var(--bg);
   color: var(--text-main);
-  /* overflow: hidden を削除 */
 }
 
 /* ===== Screen management ===== */
 .screen {
   display: none;
   width: 100%;
-  min-height: 100vh;       /* height: 100vh → min-height に変更 */
-  overflow-y: auto;        /* 内容が溢れたらスクロール */
+  min-height: 100vh;
+  overflow-y: auto;
 }
 .screen.active {
   display: flex;
@@ -52,7 +53,13 @@ body {
 }
 
 /* ===== Buttons ===== */
-button { cursor: pointer; font-family: var(--font); border: none; outline: none; transition: transform .1s, box-shadow .1s; }
+button {
+  cursor: pointer;
+  font-family: var(--font);
+  border: none;
+  outline: none;
+  transition: transform .1s, box-shadow .1s;
+}
 button:active { transform: scale(.95); }
 
 .btn-start {
@@ -67,11 +74,15 @@ button:active { transform: scale(.95); }
   letter-spacing: .05em;
 }
 .btn-start:disabled { opacity: .4; pointer-events: none; }
-.btn-start:hover:not(:disabled) { box-shadow: 0 8px 28px rgba(255,107,107,.55); transform: translateY(-2px); }
+.btn-start:hover:not(:disabled) {
+  box-shadow: 0 8px 28px rgba(255,107,107,.55);
+  transform: translateY(-2px);
+}
 
+/* ★ ボタン1.5倍: action-row 内の btn-primary / btn-sub */
 .btn-primary {
-  padding: 12px 36px;
-  font-size: 1.1rem;
+  padding: 18px 54px;          /* 12px 36px → 1.5倍 */
+  font-size: 1.65rem;          /* 1.1rem → 1.5倍 */
   font-weight: 700;
   color: #fff;
   background: linear-gradient(135deg, var(--primary), var(--primary2));
@@ -81,8 +92,8 @@ button:active { transform: scale(.95); }
 .btn-primary:hover { transform: translateY(-1px); }
 
 .btn-sub {
-  padding: 10px 24px;
-  font-size: 1rem;
+  padding: 15px 36px;          /* 10px 24px → 1.5倍 */
+  font-size: 1.5rem;           /* 1rem → 1.5倍 */
   font-weight: 700;
   color: var(--text-main);
   background: #EEF3FB;
@@ -124,7 +135,7 @@ button:active { transform: scale(.95); }
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 32px 24px 48px;   /* 下パディングを少し増やす */
+  padding: 32px 24px 48px;
   max-width: 540px;
   width: 100%;
 }
@@ -158,7 +169,12 @@ button:active { transform: scale(.95); }
 
 /* Level select */
 .level-select { width: 100%; margin-top: 28px; }
-.level-label { font-size: .95rem; color: var(--text-sub); margin-bottom: 12px; text-align: center; }
+.level-label {
+  font-size: .95rem;
+  color: var(--text-sub);
+  margin-bottom: 12px;
+  text-align: center;
+}
 
 .level-buttons {
   display: flex;
@@ -177,7 +193,7 @@ button:active { transform: scale(.95); }
   border: 3px solid transparent;
   transition: border-color .2s, box-shadow .2s;
   text-align: left;
-  width: 100%;           /* ← 追加: 親の幅に合わせる */
+  width: 100%;
 }
 
 .level-btn.selected,
@@ -212,32 +228,27 @@ button:active { transform: scale(.95); }
   font-size: .9rem;
   font-family: var(--font);
   outline: none;
-  min-width: 0;            /* ← flex item が縮めるようにする */
+  min-width: 0;
 }
 #input-api-key:focus { border-color: var(--primary); }
 .api-note { width: 100%; font-size: .75rem; color: var(--text-sub); margin-top: 4px; }
 
 /* ===== GAME SCREEN ===== */
-#screen-game {
-  /* ゲーム画面は縦スクロール可能にする */
-  overflow-y: auto;
-}
+#screen-game { overflow-y: auto; }
 
 .game-header {
   width: 100%;
-  max-width: 900px;
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 10px 16px;      /* 縦パディングを少し縮める */
+  padding: 10px 16px;
   background: var(--panel-bg);
   border-bottom: 2px solid #EEF3FB;
   position: sticky;
   top: 0;
   z-index: 10;
-  /* ヘッダーが画面幅いっぱいになるよう */
   align-self: stretch;
-  max-width: 100%;         /* ← 追加 */
+  max-width: 100%;
 }
 
 .progress-area {
@@ -245,7 +256,7 @@ button:active { transform: scale(.95); }
   display: flex;
   flex-direction: column;
   gap: 4px;
-  min-width: 0;            /* ← 追加: flexアイテムが縮めるように */
+  min-width: 0;
 }
 #progress-text { font-size: .85rem; font-weight: 700; color: var(--text-sub); }
 
@@ -263,7 +274,12 @@ button:active { transform: scale(.95); }
   transition: width .4s ease;
 }
 
-.score-area { font-size: 1rem; font-weight: 800; color: var(--primary); white-space: nowrap; }
+.score-area {
+  font-size: 1rem;
+  font-weight: 800;
+  color: var(--primary);
+  white-space: nowrap;
+}
 
 .game-main {
   width: 100%;
@@ -271,17 +287,16 @@ button:active { transform: scale(.95); }
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 12px 16px 24px; /* 下パディング追加 */
-  gap: 12px;               /* 16px → 12px に縮める */
+  padding: 12px 16px 32px;
+  gap: 16px;
   flex: 1;
 }
 
 .problem-row {
   display: flex;
-  gap: 16px;               /* 20px → 16px */
+  gap: 16px;
   width: 100%;
   justify-content: center;
-  /* flex-wrap: wrap は維持 — ただしスマホは縦並びへ */
 }
 
 .panel {
@@ -289,18 +304,72 @@ button:active { transform: scale(.95); }
   flex-direction: column;
   align-items: center;
   gap: 6px;
-  /* flex: 1 はそのまま、ただし最小幅を設定 */
   flex: 1 1 0;
-  min-width: 0;            /* ← 追加 */
+  min-width: 0;
 }
 
 .panel-label {
-  font-size: .95rem;       /* 少し縮める */
+  font-size: 1.1rem;
   font-weight: 800;
   color: var(--text-sub);
   letter-spacing: .05em;
 }
 
+/* ===== グリッドヘッダー付きレイアウト ===== */
+.grid-outer {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  /* canvas-wrap の max-width に合わせて中央寄せ */
+  align-items: flex-start;
+}
+
+/* 列ヘッダー（数字）横一列 */
+.col-header {
+  display: flex;
+  /* 左側の行ヘッダー幅分のオフセット */
+  padding-left: var(--header-size);
+  width: 100%;
+  margin-bottom: 2px;
+}
+
+.col-header-cell {
+  flex: 1;
+  text-align: center;
+  font-size: .75rem;
+  font-weight: 800;
+  color: #5588CC;
+  line-height: var(--header-size);
+  /* グリッド点と位置を合わせるため両端に補正 */
+}
+
+/* grid-body: 行ヘッダー + キャンバスを横並び */
+.grid-body {
+  display: flex;
+  flex-direction: row;
+  width: 100%;
+  align-items: flex-start;
+}
+
+/* 行ヘッダー（動物アイコン）縦一列 */
+.row-header {
+  display: flex;
+  flex-direction: column;
+  width: var(--header-size);
+  flex-shrink: 0;
+}
+
+.row-header-cell {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: .9rem;
+  line-height: 1;
+  /* キャンバスの aspect-ratio に合わせて高さを揃える */
+}
+
+/* canvas-wrap はそのまま flex:1 で残りを占有 */
 .canvas-wrap {
   position: relative;
   background: var(--panel-bg);
@@ -308,9 +377,9 @@ button:active { transform: scale(.95); }
   box-shadow: var(--shadow);
   overflow: hidden;
   border: 3px solid #DDE8F5;
-  width: 100%;
+  flex: 1 1 0;
+  min-width: 0;
   aspect-ratio: 1 / 1;
-  /* max-width を削除 — 親の .panel が幅を制御する */
 }
 
 .canvas-wrap canvas {
@@ -320,23 +389,25 @@ button:active { transform: scale(.95); }
   height: 100% !important;
 }
 
-#canvas-model { z-index: 1; }
-#canvas-answer { z-index: 1; }
+#canvas-model   { z-index: 1; }
+#canvas-answer  { z-index: 1; }
 #canvas-overlay { z-index: 2; cursor: crosshair; }
 
+/* ヒントメッセージ */
 .hint-msg {
-  font-size: .95rem;
+  font-size: 1.2rem;           /* 少し大きく */
   font-weight: 700;
   color: #1A73E8;
   background: #EAF2FF;
-  padding: 8px 20px;
+  padding: 10px 28px;
   border-radius: 20px;
   text-align: center;
 }
 
+/* ===== アクションボタン行 ===== */
 .action-row {
   display: flex;
-  gap: 12px;               /* 16px → 12px */
+  gap: 16px;
   align-items: center;
   flex-wrap: wrap;
   justify-content: center;
@@ -344,15 +415,14 @@ button:active { transform: scale(.95); }
   padding: 0 8px;
 }
 
-/* action-row ボタンの最小サイズを保証 */
+/* action-row 内ボタン: 1.5倍サイズを維持しつつ折り返し対応 */
 .action-row .btn-sub,
 .action-row .btn-primary {
   flex: 1 1 auto;
-  min-width: 80px;
-  max-width: 160px;
+  min-width: 120px;            /* 80px → 120px */
+  max-width: 240px;            /* 160px → 240px */
   text-align: center;
   white-space: nowrap;
-  padding: 10px 16px;      /* 左右パディングを縮める */
 }
 
 /* ===== FEEDBACK OVERLAY ===== */
@@ -365,19 +435,18 @@ button:active { transform: scale(.95); }
   justify-content: center;
   z-index: 100;
   padding: 16px;
-  overflow-y: auto;        /* ← 追加: 小画面でスクロール可能 */
+  overflow-y: auto;
 }
 
 .feedback-box {
   background: var(--panel-bg);
   border-radius: 24px;
-  padding: 24px 20px;      /* 32px 28px → 縮める */
+  padding: 28px 24px;
   max-width: 440px;
   width: 100%;
   text-align: center;
   box-shadow: 0 12px 40px rgba(0,0,0,.25);
   animation: popIn .3s cubic-bezier(.34,1.56,.64,1);
-  /* 小画面でオーバーフローしないよう */
   max-height: 90vh;
   overflow-y: auto;
 }
@@ -388,7 +457,7 @@ button:active { transform: scale(.95); }
 }
 
 .fb-title {
-  font-size: 1.4rem;       /* 1.6rem → 縮める */
+  font-size: 1.4rem;
   font-weight: 800;
   margin-bottom: 8px;
 }
@@ -403,12 +472,12 @@ button:active { transform: scale(.95); }
   border-radius: var(--radius);
   border: 2px solid #DDE8F5;
   display: block;
-  max-width: 260px;        /* 280px → 縮める */
+  max-width: 280px;
   margin: 0 auto 12px;
 }
 
 .gotit-img {
-  width: 140px;            /* 180px → 縮める */
+  width: 140px;
   height: 140px;
   object-fit: contain;
   animation: spinBounce .5s cubic-bezier(.34,1.56,.64,1);
@@ -433,7 +502,7 @@ button:active { transform: scale(.95); }
 }
 
 .result-cat {
-  width: 140px;            /* 160px → 縮める */
+  width: 140px;
   height: 140px;
   object-fit: contain;
   animation: bounce 2s infinite;
@@ -502,13 +571,8 @@ button:active { transform: scale(.95); }
 
 /* ===== Responsive — タブレット (601px〜900px) ===== */
 @media (min-width: 601px) and (max-width: 900px) {
-  .problem-row {
-    gap: 12px;
-  }
-  .canvas-wrap {
-    /* タブレット横向きでは2列を維持しつつサイズを抑える */
-    max-width: 300px;
-  }
+  .problem-row { gap: 12px; }
+  --header-size: 24px;
 }
 
 /* ===== Responsive — スマートフォン (〜600px) ===== */
@@ -518,51 +582,34 @@ button:active { transform: scale(.95); }
   .start-title { font-size: 1.5rem; }
   .start-sub { font-size: .9rem; }
   .btn-start { font-size: 1.1rem; padding: 13px 36px; }
-  .lv-desc { display: none; }   /* スマホでは説明文を非表示 */
+  .lv-desc { display: none; }
 
-  /* ゲーム画面: 2パネルを縦1列に */
+  /* ゲーム画面: 縦1列 */
   .problem-row {
     flex-direction: column;
     align-items: center;
-    gap: 12px;
+    gap: 16px;
   }
-
   .panel {
     width: 100%;
-    max-width: 320px;
+    max-width: 360px;
   }
 
-  /* キャンバスをコンパクトに */
-  .canvas-wrap {
-    max-width: min(320px, calc(100vw - 32px));
-  }
-
-  /* ゲームヘッダーをコンパクトに */
-  .game-header {
-    padding: 8px 12px;
-    gap: 8px;
-  }
+  /* ヘッダー */
+  .game-header { padding: 8px 12px; gap: 8px; }
   #progress-text { font-size: .75rem; }
   .score-area { font-size: .9rem; }
 
-  /* ゲームメイン余白を縮める */
-  .game-main {
-    padding: 8px 8px 20px;
-    gap: 8px;
-  }
+  /* メイン余白 */
+  .game-main { padding: 8px 8px 24px; gap: 10px; }
 
-  /* アクションボタン */
-  .action-row {
-    gap: 8px;
-  }
-  .action-row .btn-sub,
-  .action-row .btn-primary {
-    font-size: .9rem;
-    padding: 9px 12px;
-  }
+  /* アクションボタン: スマホでも1.5倍維持 */
+  .action-row { gap: 8px; }
+  .action-row .btn-sub    { font-size: 1.2rem; padding: 12px 20px; }
+  .action-row .btn-primary { font-size: 1.3rem; padding: 14px 28px; }
 
   /* フィードバック */
-  #canvas-wrong { max-width: 200px; }
+  #canvas-wrong { max-width: 220px; }
   .gotit-img { width: 110px; height: 110px; }
   .fb-title { font-size: 1.2rem; }
   .feedback-box { padding: 20px 16px; }
@@ -571,17 +618,17 @@ button:active { transform: scale(.95); }
   .result-cat { width: 110px; height: 110px; }
   .result-title { font-size: 1.5rem; }
   .result-score { font-size: 2.4rem; }
+
+  /* グリッドヘッダー小さく */
+  :root { --header-size: 22px; }
+  .col-header-cell { font-size: .65rem; }
+  .row-header-cell { font-size: .75rem; }
 }
 
 /* ===== 極小画面 (〜360px) ===== */
 @media (max-width: 360px) {
   .start-title { font-size: 1.3rem; }
-  .canvas-wrap {
-    max-width: calc(100vw - 24px);
-  }
-  .action-row .btn-sub,
-  .action-row .btn-primary {
-    font-size: .8rem;
-    padding: 8px 10px;
-  }
+  .action-row .btn-sub    { font-size: 1rem; padding: 10px 14px; }
+  .action-row .btn-primary { font-size: 1.1rem; padding: 12px 20px; }
+  :root { --header-size: 20px; }
 }
