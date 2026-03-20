@@ -1,14 +1,6 @@
 /**
  * app.js
  * メインアプリケーションロジック
- *
- * 管理するもの:
- *  - 画面遷移 (Start → Game → Result)
- *  - レベル選択
- *  - 問題ローディング (ランダム or Gemini AI)
- *  - 正誤判定
- *  - スコア管理
- *  - フィードバックポップアップ
  */
 
 /* ============================================================
@@ -16,7 +8,7 @@
    ============================================================ */
 const AppState = {
   level:        1,
-  problems:     [],   // 今セッションの5問
+  problems:     [],
   currentIndex: 0,
   score:        0,
   useAI:        false,
@@ -52,25 +44,18 @@ function showScreen(id) {
 /* ============================================================
    正誤判定
    ============================================================ */
-/**
- * ユーザーの線セットと正解線セットを比較
- * 線の向き（双方向）を考慮
- */
 function judgeAnswer(problem, userLines) {
   const correct = problem.lines;
   const hint    = problem.hintLines || [];
-
-  // ヒント線をユーザー回答に追加して判定（Level1ではヒントが事前に引かれている）
   const allUserLines = [...hint, ...userLines];
 
   if (allUserLines.length !== correct.length) return false;
 
   const normalize = l => {
-    const [a, b] = [
+    return [
       `${l.x1},${l.y1}-${l.x2},${l.y2}`,
       `${l.x2},${l.y2}-${l.x1},${l.y1}`
-    ].sort();
-    return a;
+    ].sort()[0];
   };
 
   const correctSet = new Set(correct.map(normalize));
@@ -79,13 +64,12 @@ function judgeAnswer(problem, userLines) {
     if (!correctSet.has(normalize(line))) return false;
   }
 
-  // 重複チェック
   const userSet = new Set(allUserLines.map(normalize));
   return userSet.size === correctSet.size;
 }
 
 /* ============================================================
-   UIの更新
+   UI 更新
    ============================================================ */
 function updateProgress() {
   const total = AppState.problems.length;
@@ -102,7 +86,7 @@ function updateHintMsg(problem) {
     return;
   }
   const totalLines = problem.lines.length;
-  const hintCount  = problem.hintLines.length;
+  const hintCount  = (problem.hintLines || []).length;
   const remain     = totalLines - hintCount;
   document.getElementById('hint-remain').textContent = remain;
   hintEl.classList.remove('hidden');
@@ -110,45 +94,42 @@ function updateHintMsg(problem) {
 
 /* ============================================================
    問題ロード
+   ★ 画面表示後に2フレーム待機してレイアウト確定後に描画
    ============================================================ */
 function loadQuestion(index) {
   const problem = AppState.problems[index];
   AppState.currentIndex = index;
 
   updateProgress();
-
-  // キャンバス初期化
   initCanvases(problem);
-
-  // 描画
-  // requestAnimationFrame で DOM レイアウト確定後に描画
-  requestAnimationFrame(() => {
-    drawModel(problem);
-    drawAnswer(problem);
-
-    // インタラクション設定
-    setupInteraction(problem, (lineCount) => {
-      // Level1では引ける線の数を制限
-      if (problem.level === 1) {
-        const maxLines = problem.lines.length - problem.hintLines.length;
-        const ov = document.getElementById('canvas-overlay');
-        if (lineCount >= maxLines) {
-          ov.style.pointerEvents = 'none';
-          ov.style.cursor = 'not-allowed';
-        } else {
-          ov.style.pointerEvents = 'auto';
-          ov.style.cursor = 'crosshair';
-        }
-      }
-    });
-
-    // 制限をリセット
-    const ov = document.getElementById('canvas-overlay');
-    ov.style.pointerEvents = 'auto';
-    ov.style.cursor = 'crosshair';
-  });
-
   updateHintMsg(problem);
+
+  // 2フレーム待機: aspect-ratio などの CSS レイアウト計算完了を待つ
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      drawModel(problem);
+      drawAnswer(problem);
+
+      setupInteraction(problem, (lineCount) => {
+        if (problem.level === 1) {
+          const maxLines = problem.lines.length - (problem.hintLines || []).length;
+          const ov = document.getElementById('canvas-overlay');
+          if (lineCount >= maxLines) {
+            ov.style.pointerEvents = 'none';
+            ov.style.cursor = 'not-allowed';
+          } else {
+            ov.style.pointerEvents = 'auto';
+            ov.style.cursor = 'crosshair';
+          }
+        }
+      });
+
+      // 制限をリセット（setupInteraction 後）
+      const ov = document.getElementById('canvas-overlay');
+      ov.style.pointerEvents = 'auto';
+      ov.style.cursor = 'crosshair';
+    });
+  });
 }
 
 /* ============================================================
@@ -168,7 +149,7 @@ function checkAnswer() {
     document.getElementById('feedback-wrong').classList.add('hidden');
     document.getElementById('feedback-correct').classList.remove('hidden');
     document.getElementById('praise-text').textContent = randomPraise();
-    // ポップ音エフェクト（CSS で）
+    // アニメーションをリセットして再生
     const img = document.querySelector('.gotit-img');
     img.style.animation = 'none';
     img.offsetHeight; // reflow
@@ -215,13 +196,13 @@ function showResult() {
 
 /* ============================================================
    ゲーム開始
+   ★ showScreen 後に2フレーム待機してからキャンバスを描画
    ============================================================ */
 async function startGame() {
   const level  = AppState.level;
   const apiKey = AppState.apiKey;
 
   if (apiKey) {
-    // AI生成
     showLoading(true);
     try {
       AppState.problems = await generateProblems(level, 5, apiKey);
@@ -241,9 +222,11 @@ async function startGame() {
 
   showScreen('screen-game');
 
-  // 描画は画面表示後に実施
+  // 画面遷移後、CSS レイアウト（aspect-ratio 等）が確定してから描画
   requestAnimationFrame(() => {
-    loadQuestion(0);
+    requestAnimationFrame(() => {
+      loadQuestion(0);
+    });
   });
 }
 
@@ -314,7 +297,6 @@ document.addEventListener('DOMContentLoaded', () => {
   // けすボタン
   document.getElementById('btn-clear').addEventListener('click', () => {
     clearAnswerLines();
-    // 制限を解除
     const ov = document.getElementById('canvas-overlay');
     ov.style.pointerEvents = 'auto';
     ov.style.cursor = 'crosshair';
@@ -323,7 +305,6 @@ document.addEventListener('DOMContentLoaded', () => {
   // もどすボタン
   document.getElementById('btn-undo').addEventListener('click', () => {
     undoLastLine();
-    // 制限を解除
     const ov = document.getElementById('canvas-overlay');
     ov.style.pointerEvents = 'auto';
     ov.style.cursor = 'crosshair';
@@ -352,7 +333,7 @@ document.addEventListener('DOMContentLoaded', () => {
     showScreen('screen-start');
   });
 
-  /* ---- 初期レベル選択（Level1をデフォルト選択） ---- */
+  /* ---- 初期レベル選択（Level1 をデフォルト選択） ---- */
   const defaultLvBtn = document.querySelector('.level-btn[data-level="1"]');
   if (defaultLvBtn) {
     defaultLvBtn.classList.add('selected');
