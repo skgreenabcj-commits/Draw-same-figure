@@ -122,6 +122,53 @@ function _countCross(lines) {
   return n;
 }
 
+   /**
+ * 2線分が同一直線上にあり、かつ共有領域を持つか判定する。
+ * （コリニア重複検出）
+ *
+ * @param {Object} a - {x1,y1,x2,y2}
+ * @param {Object} b - {x1,y1,x2,y2}
+ * @returns {boolean}
+ */
+function _isCollinearOverlap(a, b) {
+  const dxA = a.x2 - a.x1, dyA = a.y2 - a.y1;
+  const dxB = b.x2 - b.x1, dyB = b.y2 - b.y1;
+
+  // 外積で同一直線上にあるか確認
+  // cross(AB方向, AC) = 0 ならば C は AB の延長線上
+  const cross1 = dxA * (b.y1 - a.y1) - dyA * (b.x1 - a.x1);
+  const cross2 = dxA * (b.y2 - a.y1) - dyA * (b.x2 - a.x1);
+  if (cross1 !== 0 || cross2 !== 0) return false; // 非コリニア
+
+  // 同一直線上にある場合、1次元の重複チェック
+  // 射影をスカラー値に変換して区間重複を判定
+  const len2 = dxA * dxA + dyA * dyA;
+  if (len2 === 0) return false;
+
+  const t1 = (dxA * (b.x1 - a.x1) + dyA * (b.y1 - a.y1)) / len2;
+  const t2 = (dxA * (b.x2 - a.x1) + dyA * (b.y2 - a.y1)) / len2;
+
+  const tMin = Math.min(t1, t2);
+  const tMax = Math.max(t1, t2);
+
+  // 線分Aは t=0 から t=1。区間 [tMin,tMax] と [0,1] が重複するか
+  // 端点のみの接触（tMax==0 または tMin==1）は許容する
+  return tMax > 0 && tMin < 1;
+}
+
+/**
+ * 線分配列内にコリニア重複するペアが1組でも存在するか確認する。
+ * @param {Array} lines
+ * @returns {boolean}
+ */
+function _hasCollinearOverlap(lines) {
+  for (let i = 0; i < lines.length; i++)
+    for (let j = i + 1; j < lines.length; j++)
+      if (_isCollinearOverlap(lines[i], lines[j])) return true;
+  return false;
+}
+
+
 /* ====================================================================
    § 3. バリデーション
 ==================================================================== */
@@ -171,22 +218,31 @@ function _normalise(raw, level) {
     .filter(l => !(l.x1 === l.x2 && l.y1 === l.y2)); // 長さゼロの線分を除去
 
   // 【Fix-B】重複線分を除去（始点・終点を辞書順で正規化して比較）
-  const seen = new Set();
-  lines = lines.filter(l => {
-    const key =
-      (l.x1 < l.x2 || (l.x1 === l.x2 && l.y1 <= l.y2))
-        ? `${l.x1},${l.y1},${l.x2},${l.y2}`
-        : `${l.x2},${l.y2},${l.x1},${l.y1}`;
-    if (seen.has(key)) {
-      console.warn(`[gemini] 重複線分を除去: (${l.x1},${l.y1})-(${l.x2},${l.y2})`);
-      return false;
-    }
-    seen.add(key);
-    return true;
-  });
+   // ── Step1: 端点一致による重複を除去 ──────────────────────────────
+   const seen = new Set();
+   lines = lines.filter(l => {
+     const key =
+       (l.x1 < l.x2 || (l.x1 === l.x2 && l.y1 <= l.y2))
+         ? `${l.x1},${l.y1},${l.x2},${l.y2}`
+         : `${l.x2},${l.y2},${l.x1},${l.y1}`;
+     if (seen.has(key)) {
+       console.warn(`[gemini] 端点重複を除去: (${l.x1},${l.y1})-(${l.x2},${l.y2})`);
+       return false;
+     }
+     seen.add(key);
+     return true;
+   });
+   
+   // ── Step2: コリニア重複チェック → 該当問題全体を無効化 ──────────
+   // （部分重複線分は除去するより問題全体を棄却して再生成させる方が安全）
+   if (_hasCollinearOverlap(lines)) {
+     console.warn('[gemini] コリニア重複を検出 → この問題を棄却');
+     return null;
+   }
+   
+   // 線分数が設定値と一致しなければ無効
+   if (lines.length !== cfg.lines) return null;
 
-  // 線分数が設定値と一致しなければ無効
-  if (lines.length !== cfg.lines) return null;
 
   // ヒント線は先頭 cfg.hints 本の線分オブジェクトをそのまま使用
   const hintLines = lines.slice(0, cfg.hints);
