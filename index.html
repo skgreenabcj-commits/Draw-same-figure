@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ずけい れんしゅう 🐱</title>
+  <link rel="stylesheet" href="css/style.css" />
+  <link href="https://fonts.googleapis.com/css2?family=Kosugi+Maru&family=M+PLUS+Rounded+1c:wght@400;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css" />
+</head>
+<body>
+
+  <!-- ===== スタート画面 ===== -->
+  <div id="screen-start" class="screen active">
+    <div class="start-wrapper">
+      <img src="images/cat-mascot.png" alt="ねこキャラクター" class="start-cat" />
+      <h1 class="start-title">ずけい れんしゅう</h1>
+      <p class="start-sub">おなじずけいを かいてみよう！</p>
+
+      <div class="level-select">
+        <p class="level-label">レベルを えらんでね</p>
+        <div class="level-buttons">
+          <button class="level-btn" data-level="1">
+            <span class="lv-icon">⭐</span>
+            <span class="lv-name">レベル１</span>
+            <span class="lv-desc">4×4 ・ ヒントあり</span>
+          </button>
+          <button class="level-btn" data-level="2">
+            <span class="lv-icon">⭐⭐</span>
+            <span class="lv-name">レベル２</span>
+            <span class="lv-desc">4×4 ・ ぜんぶかく</span>
+          </button>
+          <button class="level-btn" data-level="3">
+            <span class="lv-icon">⭐⭐⭐</span>
+            <span class="lv-name">レベル３</span>
+            <span class="lv-desc">5×5 ・ もっとむずかしい</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Gemini API Key 入力 -->
+      <div class="api-section">
+        <button id="btn-toggle-api" class="btn-text-small"><i class="fa fa-robot"></i> AIで問題を作る（Gemini APIキー）</button>
+        <div id="api-key-panel" class="hidden">
+          <input id="input-api-key" type="password" placeholder="Gemini API Key を入力..." />
+          <button id="btn-save-api" class="btn-small">保存</button>
+          <p class="api-note">APIキーはブラウザ内にのみ保存されます</p>
+        </div>
+      </div>
+
+      <button id="btn-start" class="btn-start" disabled>はじめる！</button>
+    </div>
+  </div>
+
+  <!-- ===== 問題画面 ===== -->
+  <div id="screen-game" class="screen">
+    <!-- ヘッダー -->
+    <header class="game-header">
+      <button id="btn-home" class="btn-icon"><i class="fa fa-home"></i></button>
+      <div class="progress-area">
+        <span id="progress-text">1 / 5もん</span>
+        <div class="progress-bar-bg">
+          <div id="progress-bar" class="progress-bar-fill" style="width:20%"></div>
+        </div>
+      </div>
+      <div class="score-area">
+        <span id="score-text">⭐ 0</span>
+      </div>
+    </header>
+
+    <!-- 問題本体 -->
+    <main class="game-main">
+      <div class="problem-row">
+        <!-- 左：模範図 -->
+        <div class="panel">
+          <p class="panel-label">見本</p>
+          <div class="canvas-wrap">
+            <canvas id="canvas-model"></canvas>
+          </div>
+        </div>
+
+        <!-- 右：回答欄 -->
+        <div class="panel">
+          <p class="panel-label">かいてみよう</p>
+          <div class="canvas-wrap" id="answer-wrap">
+            <canvas id="canvas-answer"></canvas>
+            <!-- タッチ用オーバーレイ -->
+            <canvas id="canvas-overlay"></canvas>
+          </div>
+        </div>
+      </div>
+
+      <!-- ヒントメッセージ（Level1用） -->
+      <p id="hint-msg" class="hint-msg hidden">のこり <span id="hint-remain"></span> ほんの線をかこう！</p>
+
+      <!-- ボタン行 -->
+      <div class="action-row">
+        <button id="btn-clear" class="btn-sub"><i class="fa fa-eraser"></i> けす</button>
+        <button id="btn-check" class="btn-primary"><i class="fa fa-check"></i> こたえあわせ</button>
+        <button id="btn-undo" class="btn-sub"><i class="fa fa-undo"></i> もどす</button>
+      </div>
+    </main>
+
+    <!-- 正誤フィードバックオーバーレイ -->
+    <div id="feedback-overlay" class="feedback-overlay hidden">
+      <div id="feedback-box" class="feedback-box">
+        <div id="feedback-wrong" class="hidden">
+          <p class="fb-title wrong">もう すこし！</p>
+          <p class="fb-desc">あかい線が ただしい せんだよ</p>
+          <canvas id="canvas-wrong"></canvas>
+          <button id="btn-next-wrong" class="btn-primary mt16">つぎへ <i class="fa fa-arrow-right"></i></button>
+        </div>
+        <div id="feedback-correct" class="hidden">
+          <img src="images/gotit.png" alt="せいかい！" class="gotit-img" />
+          <p class="fb-title correct" id="praise-text"></p>
+          <button id="btn-next-correct" class="btn-primary mt16">つぎへ <i class="fa fa-arrow-right"></i></button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 結果画面 ===== -->
+  <div id="screen-result" class="screen">
+    <div class="result-wrapper">
+      <img src="images/gotit.png" alt="おわり" class="result-cat" />
+      <h2 class="result-title">おわったよ！</h2>
+      <p class="result-score-label">せいかい</p>
+      <p class="result-score"><span id="final-score">0</span> / 5もん</p>
+      <p id="result-msg" class="result-msg"></p>
+      <div class="result-buttons">
+        <button id="btn-retry" class="btn-primary"><i class="fa fa-redo"></i> もういちど</button>
+        <button id="btn-result-home" class="btn-sub"><i class="fa fa-home"></i> ホームへ</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== AI生成中スピナー ===== -->
+  <div id="loading-overlay" class="loading-overlay hidden">
+    <div class="loading-box">
+      <div class="spinner"></div>
+      <p>AIが問題を作っています…</p>
+    </div>
+  </div>
+
+  <!-- Scripts -->
+  <script src="js/problems.js"></script>
+  <script src="js/canvas.js"></script>
+  <script src="js/gemini.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
