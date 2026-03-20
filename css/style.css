@@ -21,17 +21,35 @@
   --font:      'M PLUS Rounded 1c', 'Kosugi Maru', sans-serif;
 }
 
-html, body {
+html {
   height: 100%;
   font-family: var(--font);
   background: var(--bg);
   color: var(--text-main);
-  overflow: hidden;
+  /* overflow: hidden を削除 → スクロール可能にする */
+}
+
+body {
+  min-height: 100%;
+  font-family: var(--font);
+  background: var(--bg);
+  color: var(--text-main);
+  /* overflow: hidden を削除 */
 }
 
 /* ===== Screen management ===== */
-.screen { display: none; width: 100%; height: 100vh; overflow-y: auto; }
-.screen.active { display: flex; flex-direction: column; align-items: center; justify-content: flex-start; }
+.screen {
+  display: none;
+  width: 100%;
+  min-height: 100vh;       /* height: 100vh → min-height に変更 */
+  overflow-y: auto;        /* 内容が溢れたらスクロール */
+}
+.screen.active {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+}
 
 /* ===== Buttons ===== */
 button { cursor: pointer; font-family: var(--font); border: none; outline: none; transition: transform .1s, box-shadow .1s; }
@@ -106,7 +124,7 @@ button:active { transform: scale(.95); }
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 32px 24px 40px;
+  padding: 32px 24px 48px;   /* 下パディングを少し増やす */
   max-width: 540px;
   width: 100%;
 }
@@ -159,6 +177,7 @@ button:active { transform: scale(.95); }
   border: 3px solid transparent;
   transition: border-color .2s, box-shadow .2s;
   text-align: left;
+  width: 100%;           /* ← 追加: 親の幅に合わせる */
 }
 
 .level-btn.selected,
@@ -193,23 +212,32 @@ button:active { transform: scale(.95); }
   font-size: .9rem;
   font-family: var(--font);
   outline: none;
+  min-width: 0;            /* ← flex item が縮めるようにする */
 }
 #input-api-key:focus { border-color: var(--primary); }
 .api-note { width: 100%; font-size: .75rem; color: var(--text-sub); margin-top: 4px; }
 
 /* ===== GAME SCREEN ===== */
+#screen-game {
+  /* ゲーム画面は縦スクロール可能にする */
+  overflow-y: auto;
+}
+
 .game-header {
   width: 100%;
   max-width: 900px;
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 12px 16px;
+  padding: 10px 16px;      /* 縦パディングを少し縮める */
   background: var(--panel-bg);
   border-bottom: 2px solid #EEF3FB;
   position: sticky;
   top: 0;
   z-index: 10;
+  /* ヘッダーが画面幅いっぱいになるよう */
+  align-self: stretch;
+  max-width: 100%;         /* ← 追加 */
 }
 
 .progress-area {
@@ -217,6 +245,7 @@ button:active { transform: scale(.95); }
   display: flex;
   flex-direction: column;
   gap: 4px;
+  min-width: 0;            /* ← 追加: flexアイテムが縮めるように */
 }
 #progress-text { font-size: .85rem; font-weight: 700; color: var(--text-sub); }
 
@@ -242,30 +271,31 @@ button:active { transform: scale(.95); }
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 16px;
-  gap: 16px;
+  padding: 12px 16px 24px; /* 下パディング追加 */
+  gap: 12px;               /* 16px → 12px に縮める */
   flex: 1;
 }
 
 .problem-row {
   display: flex;
-  gap: 20px;
+  gap: 16px;               /* 20px → 16px */
   width: 100%;
   justify-content: center;
-  flex-wrap: wrap;
+  /* flex-wrap: wrap は維持 — ただしスマホは縦並びへ */
 }
 
 .panel {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 8px;
-  flex: 1;
-  min-width: 0;
+  gap: 6px;
+  /* flex: 1 はそのまま、ただし最小幅を設定 */
+  flex: 1 1 0;
+  min-width: 0;            /* ← 追加 */
 }
 
 .panel-label {
-  font-size: 1rem;
+  font-size: .95rem;       /* 少し縮める */
   font-weight: 800;
   color: var(--text-sub);
   letter-spacing: .05em;
@@ -280,7 +310,7 @@ button:active { transform: scale(.95); }
   border: 3px solid #DDE8F5;
   width: 100%;
   aspect-ratio: 1 / 1;
-  max-width: 380px;
+  /* max-width を削除 — 親の .panel が幅を制御する */
 }
 
 .canvas-wrap canvas {
@@ -290,27 +320,39 @@ button:active { transform: scale(.95); }
   height: 100% !important;
 }
 
-/* canvas-model は 1枚だけ、z-indexは不要 */
 #canvas-model { z-index: 1; }
 #canvas-answer { z-index: 1; }
-/* overlay は最前面 */
 #canvas-overlay { z-index: 2; cursor: crosshair; }
 
 .hint-msg {
-  font-size: 1rem;
+  font-size: .95rem;
   font-weight: 700;
   color: #1A73E8;
   background: #EAF2FF;
   padding: 8px 20px;
   border-radius: 20px;
+  text-align: center;
 }
 
 .action-row {
   display: flex;
-  gap: 16px;
+  gap: 12px;               /* 16px → 12px */
   align-items: center;
   flex-wrap: wrap;
   justify-content: center;
+  width: 100%;
+  padding: 0 8px;
+}
+
+/* action-row ボタンの最小サイズを保証 */
+.action-row .btn-sub,
+.action-row .btn-primary {
+  flex: 1 1 auto;
+  min-width: 80px;
+  max-width: 160px;
+  text-align: center;
+  white-space: nowrap;
+  padding: 10px 16px;      /* 左右パディングを縮める */
 }
 
 /* ===== FEEDBACK OVERLAY ===== */
@@ -323,17 +365,21 @@ button:active { transform: scale(.95); }
   justify-content: center;
   z-index: 100;
   padding: 16px;
+  overflow-y: auto;        /* ← 追加: 小画面でスクロール可能 */
 }
 
 .feedback-box {
   background: var(--panel-bg);
   border-radius: 24px;
-  padding: 32px 28px;
+  padding: 24px 20px;      /* 32px 28px → 縮める */
   max-width: 440px;
   width: 100%;
   text-align: center;
   box-shadow: 0 12px 40px rgba(0,0,0,.25);
   animation: popIn .3s cubic-bezier(.34,1.56,.64,1);
+  /* 小画面でオーバーフローしないよう */
+  max-height: 90vh;
+  overflow-y: auto;
 }
 
 @keyframes popIn {
@@ -342,14 +388,14 @@ button:active { transform: scale(.95); }
 }
 
 .fb-title {
-  font-size: 1.6rem;
+  font-size: 1.4rem;       /* 1.6rem → 縮める */
   font-weight: 800;
   margin-bottom: 8px;
 }
 .fb-title.wrong   { color: var(--wrong); }
 .fb-title.correct { color: var(--correct); }
 
-.fb-desc { font-size: .95rem; color: var(--text-sub); margin-bottom: 16px; }
+.fb-desc { font-size: .95rem; color: var(--text-sub); margin-bottom: 12px; }
 
 #canvas-wrong {
   width: 100% !important;
@@ -357,13 +403,13 @@ button:active { transform: scale(.95); }
   border-radius: var(--radius);
   border: 2px solid #DDE8F5;
   display: block;
-  max-width: 280px;
-  margin: 0 auto 16px;
+  max-width: 260px;        /* 280px → 縮める */
+  margin: 0 auto 12px;
 }
 
 .gotit-img {
-  width: 180px;
-  height: 180px;
+  width: 140px;            /* 180px → 縮める */
+  height: 140px;
   object-fit: contain;
   animation: spinBounce .5s cubic-bezier(.34,1.56,.64,1);
   margin-bottom: 8px;
@@ -381,14 +427,14 @@ button:active { transform: scale(.95); }
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 40px 24px;
+  padding: 40px 24px 48px;
   max-width: 440px;
   width: 100%;
 }
 
 .result-cat {
-  width: 160px;
-  height: 160px;
+  width: 140px;            /* 160px → 縮める */
+  height: 140px;
   object-fit: contain;
   animation: bounce 2s infinite;
 }
@@ -408,7 +454,7 @@ button:active { transform: scale(.95); }
   margin-top: 4px;
 }
 .result-msg {
-  font-size: 1.1rem;
+  font-size: 1rem;
   color: var(--text-sub);
   margin-top: 12px;
   text-align: center;
@@ -454,14 +500,88 @@ button:active { transform: scale(.95); }
 /* ===== Utility ===== */
 .hidden { display: none !important; }
 
-/* ===== Responsive ===== */
+/* ===== Responsive — タブレット (601px〜900px) ===== */
+@media (min-width: 601px) and (max-width: 900px) {
+  .problem-row {
+    gap: 12px;
+  }
+  .canvas-wrap {
+    /* タブレット横向きでは2列を維持しつつサイズを抑える */
+    max-width: 300px;
+  }
+}
+
+/* ===== Responsive — スマートフォン (〜600px) ===== */
 @media (max-width: 600px) {
-  .problem-row { flex-direction: column; align-items: center; }
-  .canvas-wrap { max-width: 320px; }
-  .game-main { padding: 10px 8px; }
+  /* スタート画面 */
   .start-cat { width: 100px; height: 100px; }
-  .start-title { font-size: 1.6rem; }
-  .btn-start { font-size: 1.2rem; padding: 14px 40px; }
-  #canvas-wrong { max-width: 220px; }
-  .gotit-img { width: 130px; height: 130px; }
+  .start-title { font-size: 1.5rem; }
+  .start-sub { font-size: .9rem; }
+  .btn-start { font-size: 1.1rem; padding: 13px 36px; }
+  .lv-desc { display: none; }   /* スマホでは説明文を非表示 */
+
+  /* ゲーム画面: 2パネルを縦1列に */
+  .problem-row {
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .panel {
+    width: 100%;
+    max-width: 320px;
+  }
+
+  /* キャンバスをコンパクトに */
+  .canvas-wrap {
+    max-width: min(320px, calc(100vw - 32px));
+  }
+
+  /* ゲームヘッダーをコンパクトに */
+  .game-header {
+    padding: 8px 12px;
+    gap: 8px;
+  }
+  #progress-text { font-size: .75rem; }
+  .score-area { font-size: .9rem; }
+
+  /* ゲームメイン余白を縮める */
+  .game-main {
+    padding: 8px 8px 20px;
+    gap: 8px;
+  }
+
+  /* アクションボタン */
+  .action-row {
+    gap: 8px;
+  }
+  .action-row .btn-sub,
+  .action-row .btn-primary {
+    font-size: .9rem;
+    padding: 9px 12px;
+  }
+
+  /* フィードバック */
+  #canvas-wrong { max-width: 200px; }
+  .gotit-img { width: 110px; height: 110px; }
+  .fb-title { font-size: 1.2rem; }
+  .feedback-box { padding: 20px 16px; }
+
+  /* 結果画面 */
+  .result-cat { width: 110px; height: 110px; }
+  .result-title { font-size: 1.5rem; }
+  .result-score { font-size: 2.4rem; }
+}
+
+/* ===== 極小画面 (〜360px) ===== */
+@media (max-width: 360px) {
+  .start-title { font-size: 1.3rem; }
+  .canvas-wrap {
+    max-width: calc(100vw - 24px);
+  }
+  .action-row .btn-sub,
+  .action-row .btn-primary {
+    font-size: .8rem;
+    padding: 8px 10px;
+  }
 }
