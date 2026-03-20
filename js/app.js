@@ -3,6 +3,9 @@
  * メインアプリケーションロジック
  */
 
+/* ============================================================
+   アプリ状態
+   ============================================================ */
 const AppState = {
   level:        1,
   problems:     [],
@@ -12,6 +15,9 @@ const AppState = {
   apiKey:       ''
 };
 
+/* ============================================================
+   褒め言葉リスト
+   ============================================================ */
 const PRAISE_LIST = [
   'すごい！ぴったり！',
   'かんぺき！！ 🎉',
@@ -27,14 +33,20 @@ function randomPraise() {
   return PRAISE_LIST[Math.floor(Math.random() * PRAISE_LIST.length)];
 }
 
+/* ============================================================
+   画面切り替え
+   ============================================================ */
 function showScreen(id) {
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
   document.getElementById(id).classList.add('active');
 }
 
+/* ============================================================
+   正誤判定
+   ============================================================ */
 function judgeAnswer(problem, userLines) {
-  const correct = problem.lines;
-  const hint    = problem.hintLines || [];
+  const correct      = problem.lines;
+  const hint         = problem.hintLines || [];
   const allUserLines = [...hint, ...userLines];
 
   if (allUserLines.length !== correct.length) return false;
@@ -53,6 +65,9 @@ function judgeAnswer(problem, userLines) {
   return userSet.size === correctSet.size;
 }
 
+/* ============================================================
+   UI 更新
+   ============================================================ */
 function updateProgress() {
   const total = AppState.problems.length;
   const cur   = AppState.currentIndex + 1;
@@ -63,10 +78,13 @@ function updateProgress() {
 
 function updateHintMsg(problem) {
   const hintEl = document.getElementById('hint-msg');
-  if (problem.level !== 1) {
+
+  // Lv0 と Lv1 のみヒントメッセージを表示
+  if (problem.level !== 0 && problem.level !== 1) {
     hintEl.classList.add('hidden');
     return;
   }
+
   const remain = problem.lines.length - (problem.hintLines || []).length;
   document.getElementById('hint-remain').textContent = remain;
   hintEl.classList.remove('hidden');
@@ -82,8 +100,6 @@ function loadQuestion(index) {
   updateProgress();
   initCanvases(problem);
   updateHintMsg(problem);
-
-  // ★ グリッドヘッダーを構築（Lv1/Lv2のみ表示、Lv3は非表示）
   buildGridHeaders(problem);
 
   requestAnimationFrame(() => {
@@ -92,7 +108,8 @@ function loadQuestion(index) {
       drawAnswer(problem);
 
       setupInteraction(problem, (lineCount) => {
-        if (problem.level === 1) {
+        // Lv0 は残り1本なので最大1本、Lv1 は (全体 - ヒント数) 本
+        if (problem.level === 0 || problem.level === 1) {
           const maxLines = problem.lines.length - (problem.hintLines || []).length;
           const ov = document.getElementById('canvas-overlay');
           ov.style.pointerEvents = lineCount >= maxLines ? 'none' : 'auto';
@@ -100,6 +117,7 @@ function loadQuestion(index) {
         }
       });
 
+      // 制限をリセット（setupInteraction 後）
       const ov = document.getElementById('canvas-overlay');
       ov.style.pointerEvents = 'auto';
       ov.style.cursor = 'crosshair';
@@ -107,6 +125,9 @@ function loadQuestion(index) {
   });
 }
 
+/* ============================================================
+   こたえあわせ
+   ============================================================ */
 function checkAnswer() {
   const problem   = AppState.problems[AppState.currentIndex];
   const userLines = getAnswerLines();
@@ -131,6 +152,9 @@ function checkAnswer() {
   }
 }
 
+/* ============================================================
+   次の問題 / 結果画面
+   ============================================================ */
 function goNext() {
   document.getElementById('feedback-overlay').classList.add('hidden');
   const next = AppState.currentIndex + 1;
@@ -145,13 +169,16 @@ function showResult() {
   document.getElementById('final-score').textContent = score;
 
   let msg = '';
-  if      (score === total)        msg = 'ぜんぶせいかい！！ あなたはてんさい！🎉';
-  else if (score >= total * 0.8)   msg = 'とてもよくできました！';
-  else if (score >= total * 0.6)   msg = 'よくがんばりました！';
-  else                              msg = 'がんばった！またあそぼう！！';
+  if      (score === total)      msg = 'ぜんぶせいかい！！ あなたはてんさい！🎉';
+  else if (score >= total * 0.8) msg = 'とてもよくできました！';
+  else if (score >= total * 0.6) msg = 'よくがんばりました！';
+  else                            msg = 'がんばった！またあそぼう！！';
   document.getElementById('result-msg').textContent = msg;
 }
 
+/* ============================================================
+   ゲーム開始
+   ============================================================ */
 async function startGame() {
   const level  = AppState.level;
   const apiKey = AppState.apiKey;
@@ -183,6 +210,9 @@ async function startGame() {
   });
 }
 
+/* ============================================================
+   ローディング表示
+   ============================================================ */
 function showLoading(show) {
   document.getElementById('loading-overlay').classList.toggle('hidden', !show);
 }
@@ -192,6 +222,7 @@ function showLoading(show) {
    ============================================================ */
 document.addEventListener('DOMContentLoaded', () => {
 
+  /* ---- スタート画面 ---- */
   document.querySelectorAll('.level-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       document.querySelectorAll('.level-btn').forEach(b => b.classList.remove('selected'));
@@ -226,6 +257,7 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('input-api-key').value = savedKey;
   }
 
+  /* ---- ゲーム画面 ---- */
   document.getElementById('btn-home').addEventListener('click', () => {
     if (confirm('ホームに戻りますか？（進捗は失われます）')) showScreen('screen-start');
   });
@@ -247,11 +279,14 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('btn-check').addEventListener('click', checkAnswer);
   document.getElementById('btn-next-wrong').addEventListener('click', goNext);
   document.getElementById('btn-next-correct').addEventListener('click', goNext);
+
+  /* ---- 結果画面 ---- */
   document.getElementById('btn-retry').addEventListener('click', startGame);
   document.getElementById('btn-result-home').addEventListener('click', () => {
     showScreen('screen-start');
   });
 
+  /* ---- デフォルト: Lv1 を選択状態にする ---- */
   const defaultLvBtn = document.querySelector('.level-btn[data-level="1"]');
   if (defaultLvBtn) {
     defaultLvBtn.classList.add('selected');
