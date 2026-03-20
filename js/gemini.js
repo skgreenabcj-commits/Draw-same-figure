@@ -646,7 +646,206 @@ function _getFallback(level, count) {
   }));
 }
 
-undefined
+/* ====================================================================
+   § 11. API 送信コア（responseMimeType 自動切替 + fetchタイムアウト）
+==================================================================== */
+
+/**
+ * 単一の generateContent リクエストを送信する。
+ *
+ * 【v4.2 修正】fetch 自体に 30 秒タイムアウトを追加。
+ *
+ * @param {string}  model
+ * @param {string}  apiKey
+ * @param {string}  prompt
+ * @param {boolean} forcePlain
+ * @returns {Promise<{raw: Array|null, status: number}>}
+ */
+async function _callApi(model, apiKey, prompt, forcePlain = false) {
+  const generationConfig = {
+    temperature:     0.7,
+    maxOutputTokens: 2048
+  };
+
+  const useJsonMode = !forcePlain && !_isNoMimeCached(model);
+  if (useJsonMode) {
+    generationConfig.responseMimeType = 'application/json';
+  }
+
+  console.log(
+    `[gemini] 送信モード: ${useJsonMode ? 'JSON (responseMimeType あり)' : 'テキスト（抽出パース）'}`
+  );
+
+  // ── fetch に 30 秒タイムアウトを設定 ────────────────────────────
+  const ctrl = new AbortController();
+  const tid  = setTimeout(() => ctrl.abort(), 30000);
+
+  let resp;
+  try {
+    resp = await fetch(
+      `${BASE_URL}/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`,
+      {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal:  ctrl.signal,
+        body:    JSON.stringify({
+          contents:         [{ parts: [{ text: prompt }] }],
+          generationConfig
+        })
+      }
+    );
+    clearTimeout(tid);
+  } catch (e) {
+    clearTimeout(tid);
+    const isTimeout = e.name === 'AbortError';
+    console.error(`[gemini] fetch ${isTimeout ? 'タイムアウト(30秒)' : '失敗'}: ${e.message}`);
+    return { raw: null, status: isTimeout ? 408 : 0 };
+  }
+
+  const status = resp.status;
+
+  // ── HTTP 400: responseMimeType 非対応の可能性 ────────────────────
+  if (status === 400 && !forcePlain) {
+    console.warn(`[gemini] HTTP 400 → ${model} は responseMimeType 非対応と判定`);
+    _setNoMimeCache(model);
+    return _callApi(model, apiKey, prompt, true);
+  }
+
+  if (!resp.ok) {
+    console.warn(`[gemini] HTTP ${status} エラー`);
+    return { raw: null, status };
+  }
+
+  let data;
+  try {
+    data = await resp.json();
+  } catch (e) {
+    console.error('[gemini] レスポンス JSON パース失敗:', e.message);
+    return { raw: null, status };
+  }
+
+  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+
+  let raw;
+  if (useJsonMode) {
+    try {
+      raw = JSON.parse(text);
+      if (!Array.isArray(raw)) raw = null;
+    } catch (_) {
+      raw = _extractJsonArray(text);
+    }
+  } else {
+    raw = _extractJsonArray(text);
+  }
+
+  return { raw, status };
+}
+
+/* ====================================================================
+   § 12. 問題生成メイン（公開 API）
+==================================================================== */
+
+/**
+ * Gemini API を使って指定レベルの問題を生成して返す。
+ *
+ * 【v4.2 修正】429 リトライを独立カウンターで管理し無限ループを防止。
+ * MAX_RETRY_429（3回）超過で break → フォールバックへ移行。
+ * 待機時間は指数バックオフ（2秒→4秒→8秒、上限30秒）。
+ *
+ * @param {number} level
+ * @param {number} count
+ * @param {string} apiKey
+ * @returns {Promise<Array>}
+ */
+async function generateProblems(level, count, apiKey) {
+  if (!apiKey) {
+    console.log('[gemini] APIキー未設定 → フォールバック問題を使用');
+    return _getFallback(level, count);
+  }
+
+  const model  = await resolveModel(apiKey);
+  const prompt = _buildPrompt(level, count);
+  console.log(`[gemini] 使用モデル: ${model} / レベル: ${level} / 要求数: ${count}`);
+
+  const MAX_ATTEMPTS  = 5;
+  const MAX_RETRY_429 = 3;
+  const validated     = [];
+  let   retry429Count = 0;
+
+  for (let attempt = 0; attempt < MAX_ATTEMPTS && validated.length < count; attempt++) {
+    console.log(`[gemini] 試行 ${attempt + 1} / ${MAX_ATTEMPTS}`);
+
+    const { raw, status } = await _callApi(model, apiKey, prompt);
+
+    // ── 429: レート制限 ──────────────────────────────────────────
+    if (status === 429) {
+      retry429Count++;
+      if (retry429Count > MAX_RETRY_429) {
+        console.warn(
+          `[gemini] 429 リトライ上限（${MAX_RETRY_429}回）超過 → フォールバックへ移行`
+        );
+        break;
+      }
+      const backoff = Math.min(2000 * Math.pow(2, retry429Count - 1), 30000);
+      const wait    = backoff + Math.random() * 1000;
+      console.warn(
+        `[gemini] 429 レート制限（${retry429Count}回目）→ ${Math.round(wait)}ms 後にリトライ`
+      );
+      await new Promise(r => setTimeout(r, wait));
+      attempt--;
+      continue;
+    }
+
+    // ── 認証エラー ────────────────────────────────────────────────
+    if (status === 403 || status === 401) {
+      clearModelCache();
+      throw new Error(`認証エラー (HTTP ${status})。APIキーを確認してください。`);
+    }
+
+    // ── fetch タイムアウト / ネットワークエラー ──────────────────
+    if (status === 408 || status === 0) {
+      console.warn(`[gemini] 試行 ${attempt + 1}: タイムアウトまたはネットワークエラー → 次の試行へ`);
+      continue;
+    }
+
+    // ── レスポンスが空 ────────────────────────────────────────────
+    if (!raw) {
+      console.warn(`[gemini] 試行 ${attempt + 1}: レスポンスから問題を抽出できませんでした`);
+      continue;
+    }
+
+    // ── 正規化 + バリデーション ──────────────────────────────────
+    let newCount = 0;
+    for (const item of raw) {
+      if (validated.length >= count) break;
+      const p = _normalise(item, level);
+      if (!p) continue;
+      if (!_validate(p, level)) {
+        const n = _countCross(p.lines);
+        const { lo, hi } = LEVEL_CFG[level];
+        console.warn(`[gemini] 交差数 ${n} が範囲外 [${lo},${hi}] → スキップ`);
+        continue;
+      }
+      validated.push(p);
+      newCount++;
+    }
+    console.log(
+      `[gemini] 試行 ${attempt + 1}: ${newCount} 問取得 / 累計 ${validated.length} / 必要 ${count}`
+    );
+  }
+
+  // ── 不足分をフォールバックで補填 ────────────────────────────────
+  if (validated.length < count) {
+    const need = count - validated.length;
+    console.warn(`[gemini] ${need} 問不足 → フォールバック問題で補填します`);
+    validated.push(..._getFallback(level, need));
+  }
+
+  console.log(`[gemini] 最終: ${validated.length} 問を返します`);
+  return validated;
+}
+
+   
 /* ====================================================================
    § 13. APIキー管理（公開 API）
 ==================================================================== */
