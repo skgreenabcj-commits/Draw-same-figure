@@ -132,7 +132,6 @@ function _countCross(lines) {
  */
 function _isCollinearOverlap(a, b) {
   const dxA = a.x2 - a.x1, dyA = a.y2 - a.y1;
-  const dxB = b.x2 - b.x1, dyB = b.y2 - b.y1;
 
   // 外積で同一直線上にあるか確認
   // cross(AB方向, AC) = 0 ならば C は AB の延長線上
@@ -194,8 +193,10 @@ function _validate(problem, cfg) {
  * 線分数が設定と合わない場合は null を返す。
  *
  * 【Fix-B】重複線分除去ロジックを追加:
- *   - 始点/終点を辞書順で正規化したキーで同一性を判定
- *   - 重複を除去後、線分数が cfg.lines と不一致なら null を返す
+ *   - Step1: 始点/終点を辞書順で正規化したキーで端点一致重複を除去
+ *   - Step2: コリニア重複（同一直線上の部分重複）を検出した場合は
+ *            問題全体を棄却（null を返す）して再生成を促す
+ *   - Step1除去後に線分数が cfg.lines と不一致なら null を返す
  *
  * @param {Object} raw   - AI が返した1問分の生データ
  * @param {number} level - レベル番号
