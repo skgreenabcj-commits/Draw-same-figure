@@ -676,7 +676,6 @@ async function _callApi(model, apiKey, prompt, forcePlain = false) {
     `モード: ${useJsonMode ? 'JSON' : 'テキスト（抽出パース）'}`
   );
 
-  // ── 30秒 fetchタイムアウト ────────────────────────────────────────
   const ctrl = new AbortController();
   const tid  = setTimeout(() => ctrl.abort(), 30000);
 
@@ -706,7 +705,6 @@ async function _callApi(model, apiKey, prompt, forcePlain = false) {
 
   const status = resp.status;
 
-  // ── HTTP 400: responseMimeType 非対応 → テキストモードで即時リトライ
   if (status === 400 && !forcePlain) {
     console.warn(
       `[gemini] HTTP 400 → ${model} は responseMimeType 非対応と判定。` +
@@ -721,7 +719,6 @@ async function _callApi(model, apiKey, prompt, forcePlain = false) {
     return { raw: null, status };
   }
 
-  // ── レスポンス JSON パース ────────────────────────────────────────
   let data;
   try {
     data = await resp.json();
@@ -730,19 +727,58 @@ async function _callApi(model, apiKey, prompt, forcePlain = false) {
     return { raw: null, status };
   }
 
-  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+  // ── ★ text 取得を堅牢化 ──────────────────────────────────────────
+  // JSON モード時、モデルによっては parts[0].text が空・undefined になる場合がある。
+  // その場合はレスポンス全体を文字列化してフォールバックパースを試みる。
+  const part = data?.candidates?.[0]?.content?.parts?.[0];
+  const text = (typeof part?.text === 'string' && part.text.trim() !== '')
+    ? part.text
+    : null;
 
-  // ── 問題配列の抽出 ────────────────────────────────────────────────
-  let raw;
-  if (useJsonMode) {
+  console.log(
+    `[gemini] レスポンス取得: text=${text ? `${text.length}文字` : 'なし'} / ` +
+    `part keys=${part ? Object.keys(part).join(',') : 'none'}`
+  );
+
+  // ── ★ パース処理を堅牢化 ─────────────────────────────────────────
+  let raw = null;
+
+  if (useJsonMode && text) {
+    // JSON モード: まず直接 JSON.parse を試みる
     try {
-      raw = JSON.parse(text);
-      if (!Array.isArray(raw)) raw = null;
+      const parsed = JSON.parse(text);
+      raw = Array.isArray(parsed) ? parsed : null;
+      if (raw) {
+        console.log(`[gemini] JSON モード直接パース成功: ${raw.length}件`);
+      } else {
+        console.warn('[gemini] JSON モード: パース結果が配列でない → テキスト抽出へ');
+        raw = _extractJsonArray(text);
+      }
     } catch (_) {
+      console.warn('[gemini] JSON モード: JSON.parse 失敗 → テキスト抽出へ');
       raw = _extractJsonArray(text);
     }
+  } else if (useJsonMode && !text) {
+    // ★ JSON モードなのに text が空 → モデルが text フィールドを返さなかった
+    // レスポンス全体を文字列化してテキスト抽出を試みる
+    console.warn(
+      `[gemini] JSON モードで text フィールドが空 (${model}) → ` +
+      'レスポンス全体からフォールバック抽出を試みます'
+    );
+    const fallbackText = JSON.stringify(data);
+    raw = _extractJsonArray(fallbackText);
+
+    // それでも失敗した場合はこのモデルを no-mime 扱いにして即テキストモードで再試行
+    if (!raw) {
+      console.warn(
+        `[gemini] フォールバック抽出も失敗 → ${model} を responseMimeType 非対応として記録し再送`
+      );
+      _setNoMimeCache(model);
+      return _callApi(model, apiKey, prompt, true);
+    }
   } else {
-    raw = _extractJsonArray(text);
+    // テキストモード
+    raw = text ? _extractJsonArray(text) : null;
   }
 
   return { raw, status };
