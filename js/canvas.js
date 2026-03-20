@@ -11,6 +11,7 @@
  *   undoLastLine()
  *   clearAnswerLines()
  *   drawWrongFeedback(problem, userLines)
+ *   buildGridHeaders(problem)        ← 追加: ヘッダー DOM を構築
  */
 
 /* ============================================================
@@ -19,8 +20,8 @@
 const CanvasState = {
   userLines:  [],
   dragging:   false,
-  startPt:    null,   // { col, row }
-  currentPt:  null,   // { x, y } CSS px
+  startPt:    null,
+  currentPt:  null,
   problem:    null
 };
 
@@ -28,15 +29,103 @@ const CanvasState = {
    定数
    ============================================================ */
 const DOT_RADIUS    = 5;
-const SNAP_RADIUS   = 0.4;   // グリッド間隔の何倍以内でスナップ
+const SNAP_RADIUS   = 0.4;
 const LINE_WIDTH    = 3;
-const HINT_WIDTH    = 3;
 const MODEL_COLOR   = '#1A73E8';
-const HINT_COLOR    = '#93BBF5';
+// ★ ヒント線を見本と同色の濃い青に変更
+const HINT_COLOR    = '#1A73E8';
 const USER_COLOR    = '#FF6B6B';
-const WRONG_COLOR   = '#FF2222';
+// ★ 不正解フィードバック: 正解線を緑に変更
+const CORRECT_LINE_COLOR = '#22BB55';
 const DOT_COLOR     = '#AACCEE';
 const BG_COLOR      = '#F8FBFF';
+
+/* ============================================================
+   グリッドヘッダー用定数
+   ============================================================ */
+// 行ヘッダー：動物絵文字（上から順、Lv1/Lv2は4行、Lv3は5行）
+const ROW_ANIMALS_4 = ['🐶', '🐱', '🐰', '🐻'];
+const ROW_ANIMALS_5 = ['🐶', '🐱', '🐰', '🐻', '🐼'];
+
+// 列ヘッダー：数字（左から順）
+const COL_NUMBERS_4 = ['１', '２', '３', '４'];
+const COL_NUMBERS_5 = ['１', '２', '３', '４', '５'];
+
+/* ============================================================
+   公開: グリッドヘッダーを DOM に構築する
+   Lv1/Lv2 のみ表示、Lv3 は非表示
+   ============================================================ */
+function buildGridHeaders(problem) {
+  const showHeader = problem.level <= 2;
+  const cols = problem.grid.cols;
+  const rows = problem.grid.rows;
+
+  const colAnimals = rows === 5 ? ROW_ANIMALS_5 : ROW_ANIMALS_4;
+  const colNumbers = cols === 5 ? COL_NUMBERS_5 : COL_NUMBERS_4;
+
+  ['model', 'answer'].forEach(side => {
+    const outerEl    = document.getElementById(`grid-outer-${side}`);
+    const colHeaderEl = document.getElementById(`col-header-${side}`);
+    const rowHeaderEl = document.getElementById(`row-header-${side}`);
+
+    if (!outerEl || !colHeaderEl || !rowHeaderEl) return;
+
+    if (!showHeader) {
+      // Lv3: ヘッダーを非表示にし、canvas-wrap を直接表示
+      colHeaderEl.style.display = 'none';
+      rowHeaderEl.style.display = 'none';
+      return;
+    }
+
+    // ヘッダーを表示
+    colHeaderEl.style.display = 'flex';
+    rowHeaderEl.style.display = 'flex';
+
+    // ---- 列ヘッダー（数字）を構築 ----
+    colHeaderEl.innerHTML = '';
+    colNumbers.forEach(num => {
+      const cell = document.createElement('div');
+      cell.className = 'col-header-cell';
+      cell.textContent = num;
+      colHeaderEl.appendChild(cell);
+    });
+
+    // ---- 行ヘッダー（動物）を構築 ----
+    rowHeaderEl.innerHTML = '';
+    colAnimals.forEach(animal => {
+      const cell = document.createElement('div');
+      cell.className = 'row-header-cell';
+      cell.textContent = animal;
+      rowHeaderEl.appendChild(cell);
+    });
+
+    // ---- row-header の高さをキャンバスに同期 ----
+    // canvas-wrap の aspect-ratio:1/1 のため、幅 = 高さ
+    // 各 cell の高さをキャンバス幅 / rows で設定
+    syncRowHeaderHeight(side, rows);
+  });
+}
+
+/**
+ * 行ヘッダーの各セルの高さを canvas-wrap の実サイズに合わせる
+ * ResizeObserver から再呼び出しされる
+ */
+function syncRowHeaderHeight(side, rows) {
+  const wrap = document.querySelector(
+    side === 'model' ? '#grid-outer-model .canvas-wrap'
+                     : '#grid-outer-answer .canvas-wrap'
+  );
+  const rowHeaderEl = document.getElementById(`row-header-${side}`);
+  if (!wrap || !rowHeaderEl) return;
+
+  const canvasSize = wrap.getBoundingClientRect().width || wrap.offsetWidth || 200;
+  const cellH = canvasSize / rows;
+
+  Array.from(rowHeaderEl.children).forEach(cell => {
+    cell.style.height = cellH + 'px';
+    cell.style.minHeight = cellH + 'px';
+  });
+}
 
 /* ============================================================
    ユーティリティ
@@ -44,39 +133,30 @@ const BG_COLOR      = '#F8FBFF';
 
 /**
  * キャンバスを親要素のサイズに合わせてリサイズ（Retina 対応）
- * ★ display:none 中でも offsetWidth にフォールバックして
- *    サイズが 0 になるバグを防ぐ
- * @returns {number} CSS ピクセル単位の辺長
  */
 function resizeCanvas(canvas) {
   const wrap = canvas.parentElement;
   if (!wrap) return 300;
 
-  // getBoundingClientRect は display:none 時に 0 を返すことがある
   let size = wrap.getBoundingClientRect().width;
-  if (!size || size < 10) {
-    size = wrap.offsetWidth || 300;
-  }
+  if (!size || size < 10) size = wrap.offsetWidth || 300;
 
   const dpr          = window.devicePixelRatio || 1;
   const physicalSize = Math.round(size * dpr);
 
-  // サイズが変わった場合のみ再設定（ちらつき防止）
   if (canvas.width !== physicalSize || canvas.height !== physicalSize) {
     canvas.width  = physicalSize;
     canvas.height = physicalSize;
   }
 
   const ctx = canvas.getContext('2d');
-  ctx.setTransform(1, 0, 0, 1, 0, 0); // 変換行列をリセット
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.scale(dpr, dpr);
   return size;
 }
 
 /**
  * グリッドのレイアウト情報を計算する
- * @param {number} size   CSS px 単位のキャンバス辺長
- * @param {{cols,rows}} grid
  */
 function calcGrid(size, grid) {
   const PAD   = size * 0.12;
@@ -86,9 +166,6 @@ function calcGrid(size, grid) {
   return { pad: PAD, stepX, stepY, size };
 }
 
-/**
- * グリッド点 (col, row) の CSS px 座標を返す
- */
 function dotPos(g, col, row) {
   return {
     x: g.pad + col * g.stepX,
@@ -96,10 +173,6 @@ function dotPos(g, col, row) {
   };
 }
 
-/**
- * CSS px 座標を最近傍グリッド点にスナップする
- * スナップ圏外なら null を返す
- */
 function snapToGrid(g, px, py) {
   const grid = CanvasState.problem.grid;
   let bestDist = Infinity, bestCol = -1, bestRow = -1;
@@ -137,7 +210,7 @@ function drawDots(ctx, g, grid) {
   }
 }
 
-function drawLine(ctx, g, line, color, width, dashed) {
+function drawLine(ctx, g, line, color, width, dashed, offsetX = 0, offsetY = 0) {
   const p1 = dotPos(g, line.x1, line.y1);
   const p2 = dotPos(g, line.x2, line.y2);
   ctx.save();
@@ -146,18 +219,18 @@ function drawLine(ctx, g, line, color, width, dashed) {
   ctx.lineCap     = 'round';
   ctx.setLineDash(dashed ? [8, 6] : []);
   ctx.beginPath();
-  ctx.moveTo(p1.x, p1.y);
-  ctx.lineTo(p2.x, p2.y);
+  ctx.moveTo(p1.x + offsetX, p1.y + offsetY);
+  ctx.lineTo(p2.x + offsetX, p2.y + offsetY);
   ctx.stroke();
   ctx.restore();
 }
 
-function drawEndpoints(ctx, g, lines, color) {
+function drawEndpoints(ctx, g, lines, color, offsetX = 0, offsetY = 0) {
   for (const line of lines) {
     for (const pt of [{ x: line.x1, y: line.y1 }, { x: line.x2, y: line.y2 }]) {
       const p = dotPos(g, pt.x, pt.y);
       ctx.beginPath();
-      ctx.arc(p.x, p.y, DOT_RADIUS + 1, 0, Math.PI * 2);
+      ctx.arc(p.x + offsetX, p.y + offsetY, DOT_RADIUS + 1, 0, Math.PI * 2);
       ctx.fillStyle = color;
       ctx.fill();
     }
@@ -195,6 +268,11 @@ function drawModel(problem) {
     drawLine(ctx, g, line, MODEL_COLOR, LINE_WIDTH + 1, false);
   }
   drawEndpoints(ctx, g, problem.lines, MODEL_COLOR);
+
+  // ヘッダーセルの高さ同期
+  if (problem.level <= 2) {
+    syncRowHeaderHeight('model', problem.grid.rows);
+  }
 }
 
 /* ============================================================
@@ -209,9 +287,9 @@ function drawAnswer(problem) {
   drawBackground(ctx, size);
   drawDots(ctx, g, problem.grid);
 
-  // ヒント線（Level 1）
+  // ★ ヒント線: 見本と同色（HINT_COLOR = MODEL_COLOR = '#1A73E8'）
   for (const line of (problem.hintLines || [])) {
-    drawLine(ctx, g, line, HINT_COLOR, HINT_WIDTH + 1, false);
+    drawLine(ctx, g, line, HINT_COLOR, LINE_WIDTH + 1, false);
   }
   drawEndpoints(ctx, g, problem.hintLines || [], HINT_COLOR);
 
@@ -220,6 +298,11 @@ function drawAnswer(problem) {
     drawLine(ctx, g, line, USER_COLOR, LINE_WIDTH, false);
   }
   drawEndpoints(ctx, g, CanvasState.userLines, USER_COLOR);
+
+  // ヘッダーセルの高さ同期
+  if (problem.level <= 2) {
+    syncRowHeaderHeight('answer', problem.grid.rows);
+  }
 }
 
 /* ============================================================
@@ -236,7 +319,6 @@ function drawOverlay(problem, toPx) {
   const g      = calcGrid(size, problem.grid);
   const startP = dotPos(g, CanvasState.startPt.col, CanvasState.startPt.row);
 
-  // スタート点ハイライト
   ctx.beginPath();
   ctx.arc(startP.x, startP.y, DOT_RADIUS + 4, 0, Math.PI * 2);
   ctx.strokeStyle = USER_COLOR;
@@ -252,23 +334,17 @@ function drawOverlay(problem, toPx) {
 function setupInteraction(problem, onLineAdded) {
   CanvasState.problem = problem;
 
-  // 既存イベントをすべて除去するためノードごと置き換える
   const oldOv = document.getElementById('canvas-overlay');
   const newOv = oldOv.cloneNode(true);
   oldOv.parentNode.replaceChild(newOv, oldOv);
   const ov = document.getElementById('canvas-overlay');
 
-  /* ---------- 座標取得 ---------- */
   const getPos = (e) => {
-    const rect   = ov.getBoundingClientRect();
-    const touch  = e.touches ? e.touches[0] : e;
-    return {
-      x: touch.clientX - rect.left,
-      y: touch.clientY - rect.top
-    };
+    const rect  = ov.getBoundingClientRect();
+    const touch = e.touches ? e.touches[0] : e;
+    return { x: touch.clientX - rect.left, y: touch.clientY - rect.top };
   };
 
-  /* ---------- イベントハンドラ ---------- */
   const onStart = (e) => {
     e.preventDefault();
     const pos  = getPos(e);
@@ -276,7 +352,6 @@ function setupInteraction(problem, onLineAdded) {
     const g    = calcGrid(size, problem.grid);
     const snap = snapToGrid(g, pos.x, pos.y);
     if (!snap) return;
-
     CanvasState.dragging  = true;
     CanvasState.startPt   = snap;
     CanvasState.currentPt = pos;
@@ -296,27 +371,22 @@ function setupInteraction(problem, onLineAdded) {
     if (!CanvasState.dragging) return;
     CanvasState.dragging = false;
 
-    // タッチ終了時は changedTouches から座標を取得
     const rect   = ov.getBoundingClientRect();
     const rawPos = e.changedTouches
-      ? {
-          x: e.changedTouches[0].clientX - rect.left,
-          y: e.changedTouches[0].clientY - rect.top
-        }
+      ? { x: e.changedTouches[0].clientX - rect.left,
+          y: e.changedTouches[0].clientY - rect.top }
       : CanvasState.currentPt;
 
-    // オーバーレイをクリア
     const overlayCtx = ov.getContext('2d');
     overlayCtx.clearRect(0, 0, ov.width, ov.height);
 
     if (!rawPos) return;
-    const size   = rect.width || ov.offsetWidth || 300;
-    const g      = calcGrid(size, problem.grid);
+    const size    = rect.width || ov.offsetWidth || 300;
+    const g       = calcGrid(size, problem.grid);
     const endSnap = snapToGrid(g, rawPos.x, rawPos.y);
     if (!endSnap) return;
 
     const s = CanvasState.startPt;
-    // 同一点は無効
     if (s.col === endSnap.col && s.row === endSnap.row) return;
 
     CanvasState.userLines.push({
@@ -354,19 +424,19 @@ function clearAnswerLines() {
 
 /* ============================================================
    公開: 不正解フィードバック用キャンバス描画
-   ★ 親要素の幅に動的に追従する
+   ★ 正解線を緑で描画
+   ★ ユーザーの誤答線をオフセットして重なりを避ける
    ============================================================ */
 function drawWrongFeedback(problem, userLines) {
   const canvas = document.getElementById('canvas-wrong');
   const dpr    = window.devicePixelRatio || 1;
 
-  // 親要素の幅を基準にサイズを決める（最大 260px）
   const parentW = canvas.parentElement
     ? (canvas.parentElement.getBoundingClientRect().width
        || canvas.parentElement.offsetWidth
        || 280)
     : 280;
-  const W = Math.min(Math.round(parentW * 0.85), 260);
+  const W = Math.min(Math.round(parentW * 0.85), 280);
 
   canvas.width        = Math.round(W * dpr);
   canvas.height       = Math.round(W * dpr);
@@ -381,28 +451,43 @@ function drawWrongFeedback(problem, userLines) {
   drawBackground(ctx, W);
   drawDots(ctx, g, problem.grid);
 
-  // ユーザーの線（薄く）
+  // ★ ユーザーの誤答線: オフセット(+4px, +4px)をかけて正解線とずらす
+  //    薄いサーモンピンクで描画
+  const OFFSET_X = 4;
+  const OFFSET_Y = 4;
   for (const line of userLines) {
-    drawLine(ctx, g, line, '#FFAAAA', 2, false);
+    drawLine(ctx, g, line, '#FF9999', LINE_WIDTH, false, OFFSET_X, OFFSET_Y);
+  }
+  // 誤答線の端点もオフセット
+  for (const line of userLines) {
+    for (const pt of [{ x: line.x1, y: line.y1 }, { x: line.x2, y: line.y2 }]) {
+      const p = dotPos(g, pt.x, pt.y);
+      ctx.beginPath();
+      ctx.arc(p.x + OFFSET_X, p.y + OFFSET_Y, DOT_RADIUS, 0, Math.PI * 2);
+      ctx.fillStyle = '#FF9999';
+      ctx.fill();
+    }
   }
 
-  // 正解の線（赤・太）
+  // ★ 正解の線: 緑・太
   for (const line of problem.lines) {
-    drawLine(ctx, g, line, WRONG_COLOR, LINE_WIDTH + 1, false);
+    drawLine(ctx, g, line, CORRECT_LINE_COLOR, LINE_WIDTH + 2, false);
   }
-  drawEndpoints(ctx, g, problem.lines, WRONG_COLOR);
+  drawEndpoints(ctx, g, problem.lines, CORRECT_LINE_COLOR);
 }
 
 /* ============================================================
-   リサイズ対応
-   ★ ResizeObserver でキャンバス親要素のサイズ変化を監視
-     （デバイス回転・ウィンドウリサイズに対応）
+   リサイズ対応 — ResizeObserver
    ============================================================ */
 function setupResizeObserver() {
   const redraw = () => {
     if (!CanvasState.problem) return;
     drawModel(CanvasState.problem);
     drawAnswer(CanvasState.problem);
+    if (CanvasState.problem.level <= 2) {
+      syncRowHeaderHeight('model',  CanvasState.problem.grid.rows);
+      syncRowHeaderHeight('answer', CanvasState.problem.grid.rows);
+    }
   };
 
   if (window.ResizeObserver) {
@@ -414,13 +499,12 @@ function setupResizeObserver() {
     const ro = new ResizeObserver(redraw);
     targets.forEach(el => ro.observe(el));
   } else {
-    // ResizeObserver 非対応ブラウザ向けフォールバック
     window.addEventListener('resize', redraw);
   }
 }
 
 /* ============================================================
-   初期化（問題切り替え時に呼ぶ）
+   初期化（問題切り替え時）
    ============================================================ */
 function initCanvases(problem) {
   CanvasState.userLines  = [];
@@ -430,7 +514,4 @@ function initCanvases(problem) {
   CanvasState.problem    = problem;
 }
 
-/* ============================================================
-   DOM 読み込み後に ResizeObserver を設定
-   ============================================================ */
 document.addEventListener('DOMContentLoaded', setupResizeObserver);
