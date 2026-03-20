@@ -1,13 +1,22 @@
 'use strict';
 
 /* =====================================================================
-   gemini.js  v5.1
+   gemini.js  v5.2
    -----------------------------------------------------------------------
-   v5.1 からの変更点（v5.0 → v5.1）:
+   v5.2 からの変更点（v5.1 → v5.2）:
+     【Fix-A】LEVEL_CFG の gridN を修正（4×4グリッドに統一）
+       - Lv0,1,2: gridN 4 → 3 (gridN+1=4, 4×4グリッド)
+       - Lv3: gridN 5 → 4 (gridN+1=5, 5×5グリッド) ← 変更なし(元々5×5)
+     【Fix-B】_normalise に重複線分除去ロジックを追加
+       - 方向を正規化して同一線分を検出・除去
+       - 除去後に線分数が cfg.lines と一致しない場合は null を返す
+     【Fix-C】_buildPrompt に重複線分禁止の制約文を追加
+       - "Each line segment must be unique" のルールを明示
+
+   v5.1 の変更点（維持）:
      【整理】§8 削除に伴う不要定数・コメントのクリーンアップ
        - PREFERRED_MODEL・FALLBACK_MODELS を §1 から削除
        - ファイルヘッダーのレベル別制約を現仕様に修正
-       - v4.2 時代の機能説明（削除済み関数への言及）を除去
 
    v5.0 の機能（維持）:
      【新機能】429レート制限時のモデルフォールバックチェーン
@@ -60,11 +69,14 @@ const FALLBACK_MODEL_CHAIN = [
 // ── レベル別設定 ──────────────────────────────────────────────────────
 // lines: 線分数 / gridN: 座標最大値(=グリッドサイズ-1) /
 // lo,hi: 許容交差数範囲 / hints: ヒント本数
+// 【Fix-A】gridN を problems.js の grid 定義と統一
+//   Lv0,1,2: gridN=3 → cols/rows = gridN+1 = 4 (4×4グリッド)
+//   Lv3:     gridN=4 → cols/rows = gridN+1 = 5 (5×5グリッド)
 const LEVEL_CFG = {
-  0: { lines: 3, gridN: 4, lo: 0, hi: 6, hints: 2 },
-  1: { lines: 4, gridN: 4, lo: 0, hi: 5, hints: 2 },
-  2: { lines: 4, gridN: 4, lo: 2, hi: 5, hints: 0 },
-  3: { lines: 5, gridN: 5, lo: 0, hi: 8, hints: 0 }
+  0: { lines: 3, gridN: 3, lo: 0, hi: 6, hints: 2 },
+  1: { lines: 4, gridN: 3, lo: 0, hi: 5, hints: 2 },
+  2: { lines: 4, gridN: 3, lo: 2, hi: 5, hints: 0 },
+  3: { lines: 5, gridN: 4, lo: 0, hi: 8, hints: 0 }
 };
 
 /* ====================================================================
@@ -131,8 +143,12 @@ function _validate(problem, cfg) {
 
 /**
  * Gemini が返した JSON の1要素を受け取り、座標クランプ・長さゼロ除去・
- * hintLines 付与を行って問題オブジェクトを返す。
+ * 重複線分除去・hintLines 付与を行って問題オブジェクトを返す。
  * 線分数が設定と合わない場合は null を返す。
+ *
+ * 【Fix-B】重複線分除去ロジックを追加:
+ *   - 始点/終点を辞書順で正規化したキーで同一性を判定
+ *   - 重複を除去後、線分数が cfg.lines と不一致なら null を返す
  *
  * @param {Object} raw   - AI が返した1問分の生データ
  * @param {number} level - レベル番号
@@ -145,7 +161,7 @@ function _normalise(raw, level) {
   // 座標を [0, maxC] の整数にクランプ
   const clamp = v => Math.max(0, Math.min(maxC, Math.round(Number(v) || 0)));
 
-  const lines = (raw.lines || [])
+  let lines = (raw.lines || [])
     .map(l => ({
       x1: clamp(l.x1 ?? l.x ?? 0),
       y1: clamp(l.y1 ?? l.y ?? 0),
@@ -154,12 +170,25 @@ function _normalise(raw, level) {
     }))
     .filter(l => !(l.x1 === l.x2 && l.y1 === l.y2)); // 長さゼロの線分を除去
 
+  // 【Fix-B】重複線分を除去（始点・終点を辞書順で正規化して比較）
+  const seen = new Set();
+  lines = lines.filter(l => {
+    const key =
+      (l.x1 < l.x2 || (l.x1 === l.x2 && l.y1 <= l.y2))
+        ? `${l.x1},${l.y1},${l.x2},${l.y2}`
+        : `${l.x2},${l.y2},${l.x1},${l.y1}`;
+    if (seen.has(key)) {
+      console.warn(`[gemini] 重複線分を除去: (${l.x1},${l.y1})-(${l.x2},${l.y2})`);
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+
   // 線分数が設定値と一致しなければ無効
   if (lines.length !== cfg.lines) return null;
 
   // ヒント線は先頭 cfg.hints 本の線分オブジェクトをそのまま使用
-  // （数値インデックス配列ではなくオブジェクト配列にすることで
-  //   canvas.js の drawLine() / app.js の judgeAnswer() と型が一致する）
   const hintLines = lines.slice(0, cfg.hints);
 
   return {
@@ -415,6 +444,7 @@ function clearModelCache() {
 /**
  * Gemini に送るプロンプト文字列を組み立てる。
  * レベル別の線分数・グリッドサイズ・交差数制約・自己チェック手順を含む。
+ * 【Fix-C】重複線分禁止ルールを明示的に追加。
  *
  * @param {number} level
  * @param {number} count
@@ -430,6 +460,7 @@ Rules:
 - Each problem has exactly ${lineCount} line segments on a ${gridN + 1}x${gridN + 1} grid.
 - All coordinates are integers in the range [0, ${gridN}] (inclusive).
 - No zero-length lines (x1==x2 AND y1==y2 is forbidden).
+- Each line segment must be unique. No two segments may share identical endpoints, even if the order of endpoints is reversed (i.e., {x1,y1,x2,y2} and {x2,y2,x1,y1} are considered the same and duplicates are forbidden).
 - The number of STRICT INTERNAL intersections must be between ${lo} and ${hi} (inclusive).
   - "Strict internal" means two segments cross at a point that is interior to BOTH segments.
   - Shared endpoints do NOT count as intersections.
@@ -437,10 +468,11 @@ Rules:
 - Generate exactly ${count} distinct problems.
 
 Self-check before outputting:
-1. For every pair of lines, determine if they strictly internally intersect.
-2. Count the total intersections for the problem.
-3. Confirm the count is in [${lo}, ${hi}].
-4. If not, adjust the lines and recheck.
+1. For every pair of lines, confirm they are not identical (including reversed direction).
+2. For every pair of lines, determine if they strictly internally intersect.
+3. Count the total intersections for the problem.
+4. Confirm the count is in [${lo}, ${hi}].
+5. If any check fails, adjust the lines and recheck.
 
 Output ONLY a JSON array, no markdown, no explanation:
 [
@@ -475,14 +507,12 @@ const _FALLBACK = {
     // 上下水平2本＋斜め1本（交差0）
   ],
   1: [
-    /* 変更なし */
     { lines: [{ x1:0,y1:0,x2:3,y2:0 },{ x1:0,y1:1,x2:3,y2:1 },{ x1:0,y1:2,x2:3,y2:2 },{ x1:0,y1:3,x2:3,y2:3 }] },
     { lines: [{ x1:0,y1:0,x2:1,y2:3 },{ x1:1,y1:0,x2:0,y2:3 },{ x1:2,y1:0,x2:3,y2:1 },{ x1:2,y1:2,x2:3,y2:3 }] },
     { lines: [{ x1:0,y1:0,x2:1,y2:3 },{ x1:1,y1:0,x2:0,y2:3 },{ x1:2,y1:0,x2:3,y2:3 },{ x1:3,y1:0,x2:2,y2:3 }] },
     { lines: [{ x1:0,y1:0,x2:3,y2:2 },{ x1:0,y1:2,x2:3,y2:0 },{ x1:1,y1:0,x2:0,y2:3 },{ x1:3,y1:2,x2:3,y2:3 }] },
     { lines: [{ x1:0,y1:1,x2:3,y2:2 },{ x1:0,y1:2,x2:3,y2:1 },{ x1:0,y1:0,x2:3,y2:3 },{ x1:2,y1:0,x2:3,y2:0 }] }
   ],
-  /* Lv2・Lv3は変更なし */
   2: [
     { lines: [{ x1:0,y1:0,x2:1,y2:3 },{ x1:1,y1:0,x2:0,y2:3 },{ x1:2,y1:0,x2:3,y2:3 },{ x1:3,y1:0,x2:2,y2:3 }] },
     { lines: [{ x1:0,y1:0,x2:3,y2:2 },{ x1:0,y1:2,x2:3,y2:0 },{ x1:1,y1:0,x2:2,y2:3 },{ x1:0,y1:3,x2:1,y2:3 }] },
@@ -677,7 +707,7 @@ function _extractAndValidate(result, level, count, cfg) {
 }
 
 /* ====================================================================
-   § 13. 問題生成メイン（公開 API）  ← §13 全体をこれで差し替え
+   § 13. 問題生成メイン（公開 API）
 ==================================================================== */
 
 /**
@@ -709,10 +739,8 @@ async function generateProblems(level, count, apiKey) {
 
   const MAX_ATTEMPTS_PER_MODEL = 5;  // 1モデルあたりの最大生成試行数
   const MAX_429_PER_MODEL      = 3;  // 1モデルあたりの429許容回数
-                                     // （1回バックオフ→2回目バックオフ→3回目でbreak）
 
   // ── FALLBACK_MODEL_CHAIN を先頭から順に走査 ───────────────────────
-  // resolveModel() は呼ばない。チェーンの先頭が常にプライマリモデル。
   for (let mi = 0; mi < FALLBACK_MODEL_CHAIN.length; mi++) {
     const model    = FALLBACK_MODEL_CHAIN[mi];
     let attempt429 = 0;
@@ -772,30 +800,24 @@ async function generateProblems(level, count, apiKey) {
       const problems = _extractAndValidate(result, level, count, cfg);
       if (problems) {
         console.log(
-          `[gemini] 問題生成成功: ${model} (試行${attempt + 1}/${MAX_ATTEMPTS_PER_MODEL})`
+          `[gemini] 問題生成成功: ${problems.length}件 (${model} 試行${attempt + 1})`
         );
+        _saveModel(model);
         return problems;
       }
 
       console.warn(
-        `[gemini] パース/バリデーション失敗 (${model} 試行${attempt + 1}) → 次試行へ`
+        `[gemini] バリデーション失敗 (${model} 試行${attempt + 1}) → 再試行`
       );
+    }
 
-    } // end inner for (attempt)
+    console.warn(`[gemini] チェーン[${mi}] ${model} 全試行失敗 → 次モデルへ`);
+  }
 
-    const nextModel = FALLBACK_MODEL_CHAIN[mi + 1];
-    console.warn(
-      `[gemini] ${model}: 全試行失敗 → ` +
-      (nextModel ? `次モデル: ${nextModel}` : 'フォールバックBANKへ')
-    );
-
-  } // end outer for (mi)
-
-  // ── 全モデル失敗 → ローカルBANKフォールバック ────────────────────
-  console.warn('[gemini] 全モデル失敗 → _getFallback() を使用します');
+  // ── 全モデル失敗 → フォールバックBANKを使用 ─────────────────────
+  console.warn('[gemini] 全モデル失敗 → フォールバックBANKを使用');
   return _getFallback(level, count);
 }
-
 
 /* ====================================================================
    § 14. APIキー管理（公開 API）
@@ -803,19 +825,10 @@ async function generateProblems(level, count, apiKey) {
 
 /**
  * APIキーを localStorage に保存する。
- * キー変更時はモデルキャッシュと no-mime フラグを同時にクリアする。
  * @param {string} key
  */
 function saveApiKey(key) {
-  try {
-    const prev = localStorage.getItem('gemini_api_key');
-    if (prev !== key) {
-      clearModelCache();
-      _clearNoMimeCache();
-      console.log('[gemini] APIキー変更を検出: モデルキャッシュをリセットしました');
-    }
-    localStorage.setItem('gemini_api_key', key);
-  } catch (_) {}
+  try { localStorage.setItem('gemini_api_key', key); } catch (_) {}
 }
 
 /**
@@ -830,14 +843,15 @@ function loadApiKey() {
    § 15. モジュールエクスポート
 ==================================================================== */
 
-return {
-  generateProblems,
-  saveApiKey,
-  loadApiKey,
-  clearModelCache
-};
+  return {
+    generateProblems,
+    saveApiKey,
+    loadApiKey,
+    clearModelCache,
+    _clearNoMimeCache  // デバッグ・テスト用に公開
+  };
 
-})(); // end _G IIFE
+})();
 
-// ── グローバル公開（index.html から直接参照できるようにする）────────
+// グローバルスコープへ展開（app.js から直接呼び出せるように）
 const { generateProblems, saveApiKey, loadApiKey, clearModelCache } = _G;
