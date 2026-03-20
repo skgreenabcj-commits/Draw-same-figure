@@ -1,23 +1,26 @@
 'use strict';
 
 /* =====================================================================
-   gemini.js  v2.2  – バグ修正 + 高速化
-   
-   【修正点】
-   1. gridN 変数シャドウイングバグを完全修正
-   2. モデルテストを Promise.race による並列化で高速化（15秒→2-3秒）
-   3. _gNormalize の呼び出しを全て関数先頭で定義された gridN に統一
-   4. バリデーション失敗時のログを強化
-   
-   交差数制限: Lv0:1–2 / Lv1:1–3 / Lv2:3–5 / Lv3:制限なし
+   gemini.js  v3.0
+   - Dynamic model selection with parallel probing & 24h cache
+   - Intersection validation mirrors problems.js _cross exactly
+   - Self-contained: no external dependencies
+   - Level constraints:
+       Lv0: 0-2  (4 lines, 4x4 grid)
+       Lv1: 0-3  (4 lines, 4x4 grid)
+       Lv2: 2-5  (4 lines, 4x4 grid)
+       Lv3: 0-8  (5 lines, 5x5 grid)
 ===================================================================== */
 
-/* ============================================================
-   定数
-   ============================================================ */
-const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
+const _G = (() => {
 
-const FALLBACK_MODEL_PRIORITY = [
+/* ── constants ─────────────────────────────────────────────────────── */
+const BASE_URL        = 'https://generativelanguage.googleapis.com/v1beta';
+const MODEL_CACHE_KEY = 'gemini_model_v3';
+const MODEL_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 h
+
+const PREFERRED_MODEL  = 'gemini-2.5-flash';
+const FALLBACK_MODELS  = [
   'gemini-2.5-flash',
   'gemini-2.0-flash',
   'gemini-2.0-flash-lite',
@@ -27,487 +30,369 @@ const FALLBACK_MODEL_PRIORITY = [
   'gemini-1.0-pro'
 ];
 
-const MODEL_CACHE_KEY = 'gemini_selected_model';
-const MODEL_CACHE_TTL = 24 * 60 * 60 * 1000;
-
-/* ============================================================
-   交差判定 — problems.js の _cross と完全同一ロジック
-   （d1*d2<0 かつ d3*d4<0 の厳密内部交差のみ）
-   ============================================================ */
-function _gCross(ax, ay, bx, by, cx, cy, dx, dy) {
-  if ((ax === cx && ay === cy) || (ax === dx && ay === dy) ||
-      (bx === cx && by === cy) || (bx === dx && by === dy)) return false;
-  const d1 = (dx - cx) * (ay - cy) - (dy - cy) * (ax - cx);
-  const d2 = (dx - cx) * (by - cy) - (dy - cy) * (bx - cx);
-  const d3 = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
-  const d4 = (bx - ax) * (dy - ay) - (by - ay) * (dx - ax);
-  return ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
-         ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0));
-}
-
-function _gCountCross(lines) {
-  let n = 0;
-  for (let i = 0; i < lines.length; i++)
-    for (let j = i + 1; j < lines.length; j++) {
-      const a = lines[i], b = lines[j];
-      if (_gCross(a.x1, a.y1, a.x2, a.y2, b.x1, b.y1, b.x2, b.y2)) n++;
-    }
-  return n;
-}
-
-function _gValidateCross(lines, level) {
-  const n = _gCountCross(lines);
-  if (level === 0) return n >= 1 && n <= 2;
-  if (level === 1) return n >= 1 && n <= 3;
-  if (level === 2) return n >= 3 && n <= 5;
-  return true;
-}
-
-function _gCrossLimitStr(level) {
-  if (level === 0) return '1–2';
-  if (level === 1) return '1–3';
-  if (level === 2) return '3–5';
-  return '制限なし';
-}
-
-/* ============================================================
-   座標クランプ & 問題正規化（外部依存なし）
-   ============================================================ */
-function _gNormalize(raw, level, gridCols, gridRows) {
-  // ★ gridCols/gridRows を引数で受け取り、外部変数に依存しない
-  const lv   = (level !== undefined) ? level : (raw.level ?? 1);
-  const cols = gridCols ?? raw.grid?.cols ?? (lv === 3 ? 5 : 4);
-  const rows = gridRows ?? raw.grid?.rows ?? (lv === 3 ? 5 : 4);
-  const clamp = (v, max) =>
-    Math.max(0, Math.min(max, Math.round(Number(v) || 0)));
-
-  const lines = (raw.lines || [])
-    .map(l => ({
-      x1: clamp(l.x1, cols - 1), y1: clamp(l.y1, rows - 1),
-      x2: clamp(l.x2, cols - 1), y2: clamp(l.y2, rows - 1),
-    }))
-    .filter(l => !(l.x1 === l.x2 && l.y1 === l.y2));
-
-  let hintLines = [];
-  if      (lv === 0) hintLines = lines.slice(0, 3);
-  else if (lv === 1) hintLines = lines.slice(0, 2);
-
-  return { level: lv, grid: { cols, rows }, lines, hintLines };
-}
-
-/* ============================================================
-   フォールバック問題バンク（gemini.js 内蔵・検証済み）
-   ============================================================ */
-const _GEMINI_FALLBACK = {
-  // Lv0: 交差1–2
-  0: [
-    {lines:[{x1:0,y1:0,x2:3,y2:1},{x1:0,y1:1,x2:3,y2:0},{x1:0,y1:2,x2:3,y2:2},{x1:1,y1:0,x2:1,y2:3}]}, // 2交差
-    {lines:[{x1:0,y1:0,x2:3,y2:1},{x1:1,y1:0,x2:0,y2:3},{x1:0,y1:2,x2:3,y2:2},{x1:2,y1:0,x2:2,y2:3}]}, // 2交差
-    {lines:[{x1:0,y1:0,x2:2,y2:3},{x1:1,y1:0,x2:3,y2:3},{x1:0,y1:2,x2:3,y2:2},{x1:0,y1:1,x2:3,y2:1}]}, // 2交差
-    {lines:[{x1:0,y1:0,x2:3,y2:0},{x1:0,y1:3,x2:3,y2:3},{x1:0,y1:0,x2:3,y2:2},{x1:3,y1:0,x2:1,y2:3}]}, // 1交差
-    {lines:[{x1:0,y1:0,x2:3,y2:0},{x1:0,y1:0,x2:0,y2:3},{x1:0,y1:2,x2:2,y2:0},{x1:1,y1:1,x2:3,y2:3}]}, // 1交差
-    {lines:[{x1:0,y1:0,x2:3,y2:2},{x1:3,y1:0,x2:0,y2:2},{x1:0,y1:1,x2:3,y2:1},{x1:2,y1:0,x2:2,y2:3}]}, // 2交差
-    {lines:[{x1:0,y1:0,x2:3,y2:1},{x1:2,y1:0,x2:0,y2:3},{x1:0,y1:2,x2:3,y2:2},{x1:1,y1:0,x2:1,y2:3}]}, // 2交差
-    {lines:[{x1:0,y1:0,x2:2,y2:3},{x1:1,y1:0,x2:3,y2:2},{x1:0,y1:2,x2:3,y2:2},{x1:0,y1:1,x2:2,y2:1}]}, // 2交差
-    {lines:[{x1:0,y1:0,x2:3,y2:3},{x1:3,y1:0,x2:0,y2:3},{x1:0,y1:0,x2:3,y2:0},{x1:0,y1:3,x2:3,y2:3}]}, // 1交差
-    {lines:[{x1:0,y1:1,x2:2,y2:3},{x1:1,y1:0,x2:3,y2:2},{x1:0,y1:2,x2:3,y2:2},{x1:2,y1:0,x2:2,y2:3}]}, // 2交差
-  ],
-  // Lv1: 交差1–3
-  1: [
-    {lines:[{x1:0,y1:0,x2:3,y2:2},{x1:0,y1:2,x2:3,y2:0},{x1:0,y1:1,x2:3,y2:1},{x1:1,y1:0,x2:1,y2:3}]}, // 3交差
-    {lines:[{x1:0,y1:0,x2:3,y2:2},{x1:0,y1:3,x2:3,y2:1},{x1:0,y1:2,x2:3,y2:2},{x1:2,y1:0,x2:2,y2:3}]}, // 2交差
-    {lines:[{x1:0,y1:1,x2:3,y2:1},{x1:1,y1:0,x2:1,y2:3},{x1:0,y1:0,x2:3,y2:2},{x1:3,y1:0,x2:0,y2:3}]}, // 3交差
-    {lines:[{x1:0,y1:0,x2:2,y2:3},{x1:2,y1:0,x2:0,y2:3},{x1:0,y1:2,x2:3,y2:2},{x1:1,y1:0,x2:3,y2:2}]}, // 2交差
-    {lines:[{x1:0,y1:0,x2:3,y2:0},{x1:0,y1:3,x2:3,y2:3},{x1:0,y1:0,x2:3,y2:3},{x1:3,y1:0,x2:0,y2:3}]}, // 1交差
-    {lines:[{x1:0,y1:2,x2:3,y2:2},{x1:2,y1:0,x2:2,y2:3},{x1:0,y1:0,x2:3,y2:2},{x1:0,y1:3,x2:3,y2:0}]}, // 3交差
-    {lines:[{x1:0,y1:0,x2:3,y2:3},{x1:3,y1:0,x2:0,y2:3},{x1:1,y1:0,x2:2,y2:3},{x1:2,y1:0,x2:3,y2:2}]}, // 1交差
-    {lines:[{x1:0,y1:1,x2:3,y2:1},{x1:0,y1:2,x2:3,y2:2},{x1:0,y1:0,x2:3,y2:2},{x1:3,y1:0,x2:0,y2:3}]}, // 3交差
-    {lines:[{x1:0,y1:0,x2:3,y2:3},{x1:1,y1:0,x2:3,y2:2},{x1:0,y1:1,x2:2,y2:3},{x1:0,y1:3,x2:3,y2:0}]}, // 3交差
-    {lines:[{x1:0,y1:0,x2:3,y2:0},{x1:0,y1:0,x2:0,y2:3},{x1:0,y1:0,x2:3,y2:3},{x1:3,y1:0,x2:0,y2:3}]}, // 1交差
-  ],
-  // Lv2: 交差3–5
-  2: [
-    {lines:[{x1:0,y1:1,x2:3,y2:1},{x1:0,y1:2,x2:3,y2:2},{x1:1,y1:0,x2:1,y2:3},{x1:2,y1:0,x2:2,y2:3},{x1:0,y1:0,x2:3,y2:3}]}, // 5交差
-    {lines:[{x1:0,y1:0,x2:3,y2:3},{x1:0,y1:3,x2:3,y2:0},{x1:0,y1:0,x2:0,y2:3},{x1:3,y1:0,x2:3,y2:3},{x1:0,y1:1,x2:3,y2:1}]}, // 3交差
-    {lines:[{x1:1,y1:0,x2:0,y2:3},{x1:2,y1:0,x2:3,y2:3},{x1:0,y1:1,x2:3,y2:0},{x1:0,y1:2,x2:3,y2:3},{x1:0,y1:0,x2:3,y2:2}]}, // 5交差
-    {lines:[{x1:0,y1:0,x2:3,y2:2},{x1:3,y1:0,x2:0,y2:2},{x1:0,y1:1,x2:3,y2:1},{x1:1,y1:0,x2:1,y2:3},{x1:2,y1:0,x2:2,y2:3}]}, // 4交差
-    {lines:[{x1:0,y1:0,x2:3,y2:3},{x1:3,y1:0,x2:0,y2:3},{x1:0,y1:2,x2:3,y2:1},{x1:2,y1:0,x2:3,y2:2},{x1:0,y1:1,x2:2,y2:3}]}, // 4交差
-    {lines:[{x1:0,y1:0,x2:3,y2:3},{x1:3,y1:0,x2:0,y2:3},{x1:0,y1:1,x2:3,y2:2},{x1:1,y1:0,x2:2,y2:3},{x1:0,y1:2,x2:3,y2:2}]}, // 5交差
-    {lines:[{x1:0,y1:0,x2:3,y2:3},{x1:3,y1:0,x2:0,y2:3},{x1:0,y1:2,x2:3,y2:1},{x1:2,y1:0,x2:3,y2:2},{x1:0,y1:1,x2:2,y2:3}]}, // 4交差
-    {lines:[{x1:0,y1:0,x2:3,y2:2},{x1:3,y1:0,x2:0,y2:3},{x1:0,y1:1,x2:3,y2:1},{x1:0,y1:2,x2:3,y2:0},{x1:1,y1:0,x2:2,y2:3}]}, // 5交差
-    {lines:[{x1:1,y1:0,x2:0,y2:3},{x1:2,y1:0,x2:3,y2:3},{x1:0,y1:1,x2:3,y2:0},{x1:0,y1:2,x2:3,y2:3},{x1:0,y1:0,x2:3,y2:2}]}, // 5交差
-    {lines:[{x1:0,y1:0,x2:3,y2:3},{x1:3,y1:0,x2:0,y2:3},{x1:0,y1:1,x2:3,y2:1},{x1:0,y1:2,x2:3,y2:2},{x1:2,y1:0,x2:3,y2:2}]}, // 4交差
-  ],
-  // Lv3: 制限なし
-  3: [
-    {lines:[{x1:0,y1:0,x2:4,y2:4},{x1:4,y1:0,x2:0,y2:4},{x1:0,y1:2,x2:4,y2:2},{x1:2,y1:0,x2:2,y2:4},{x1:0,y1:0,x2:4,y2:2},{x1:0,y1:4,x2:4,y2:0}]},
-    {lines:[{x1:0,y1:0,x2:4,y2:4},{x1:4,y1:0,x2:0,y2:4},{x1:0,y1:1,x2:4,y2:1},{x1:0,y1:3,x2:4,y2:3},{x1:1,y1:0,x2:1,y2:4},{x1:3,y1:0,x2:3,y2:4}]},
-    {lines:[{x1:0,y1:1,x2:4,y2:1},{x1:0,y1:3,x2:4,y2:3},{x1:1,y1:0,x2:1,y2:4},{x1:3,y1:0,x2:3,y2:4},{x1:0,y1:0,x2:4,y2:4},{x1:4,y1:0,x2:0,y2:4}]},
-    {lines:[{x1:0,y1:0,x2:4,y2:4},{x1:4,y1:0,x2:0,y2:4},{x1:0,y1:2,x2:4,y2:0},{x1:0,y1:2,x2:4,y2:4},{x1:2,y1:0,x2:0,y2:4},{x1:2,y1:0,x2:4,y2:4}]},
-    {lines:[{x1:0,y1:0,x2:4,y2:4},{x1:4,y1:0,x2:0,y2:4},{x1:0,y1:1,x2:4,y2:1},{x1:0,y1:2,x2:4,y2:2},{x1:0,y1:3,x2:4,y2:3},{x1:1,y1:0,x2:1,y2:4}]},
-  ],
+const LEVEL_CFG = {
+  0: { lines:4, gridN:3, lo:0, hi:2, hints:3 },
+  1: { lines:4, gridN:3, lo:0, hi:3, hints:2 },
+  2: { lines:4, gridN:3, lo:2, hi:5, hints:0 },
+  3: { lines:5, gridN:4, lo:0, hi:8, hints:0 }
 };
 
-function _getFallbackPool(level) {
-  if (typeof PROBLEM_BANK !== 'undefined' && PROBLEM_BANK && PROBLEM_BANK[level]) {
-    return PROBLEM_BANK[level].slice();
-  }
-  return (_GEMINI_FALLBACK[level] || _GEMINI_FALLBACK[1]).slice();
+/* ── strict internal intersection (identical to problems.js _cross) ── */
+function _cross(ax,ay,bx,by,cx,cy,dx,dy){
+  if((ax===cx&&ay===cy)||(ax===dx&&ay===dy)) return false;
+  if((bx===cx&&by===cy)||(bx===dx&&by===dy)) return false;
+  const d1=(dx-cx)*(ay-cy)-(dy-cy)*(ax-cx);
+  const d2=(dx-cx)*(by-cy)-(dy-cy)*(bx-cx);
+  const d3=(bx-ax)*(cy-ay)-(by-ay)*(cx-ax);
+  const d4=(bx-ax)*(dy-ay)-(by-ay)*(dx-ax);
+  return ((d1>0&&d2<0)||(d1<0&&d2>0))&&((d3>0&&d4<0)||(d3<0&&d4>0));
+}
+function _countCross(lines){
+  let n=0;
+  for(let i=0;i<lines.length;i++)
+    for(let j=i+1;j<lines.length;j++)
+      if(_cross(lines[i].x1,lines[i].y1,lines[i].x2,lines[i].y2,
+                lines[j].x1,lines[j].y1,lines[j].x2,lines[j].y2)) n++;
+  return n;
+}
+function _validate(lines, level){
+  const {lo,hi} = LEVEL_CFG[level] || LEVEL_CFG[1];
+  const n = _countCross(lines);
+  return n >= lo && n <= hi;
 }
 
-/* ============================================================
-   モデル選択ロジック（並列テストで高速化）
-   ============================================================ */
-async function fetchAvailableModels(apiKey) {
-  const res = await fetch(
-    `${GEMINI_BASE_URL}/models?key=${encodeURIComponent(apiKey)}`,
-    { method: 'GET' }
-  );
-  if (!res.ok) throw new Error(`モデル一覧取得失敗: ${res.status}`);
-  const data = await res.json();
-  const models = (data.models || [])
-    .map(m => m.name.replace('models/', ''))
-    .filter(name =>
-      name.startsWith('gemini') &&
-      !name.includes('embedding') &&
-      !name.includes('vision') &&
-      !name.includes('aqa')
-    );
-  console.log('[Gemini] 利用可能なモデル:', models);
-  return models;
+/* ── normalise raw AI output into canonical line objects ────────────── */
+function _normalise(raw, level){
+  const cfg  = LEVEL_CFG[level] || LEVEL_CFG[1];
+  const maxC = cfg.gridN;
+  const clamp = v => Math.max(0, Math.min(maxC, Math.round(Number(v)||0)));
+
+  const lines = (raw.lines||[])
+    .map(l => ({
+      x1: clamp(l.x1 ?? l.x ?? 0),
+      y1: clamp(l.y1 ?? l.y ?? 0),
+      x2: clamp(l.x2 ?? (l.x+1) ?? 1),
+      y2: clamp(l.y2 ?? (l.y+1) ?? 1)
+    }))
+    .filter(l => !(l.x1===l.x2 && l.y1===l.y2)); // drop zero-length
+
+  if(lines.length !== cfg.lines) return null;
+
+  // build hintLines indices (first cfg.hints lines)
+  const hintLines = Array.from({length: cfg.hints}, (_,i) => i);
+
+  return {
+    level,
+    grid: { cols: cfg.gridN+1, rows: cfg.gridN+1 },
+    lines,
+    hintLines
+  };
 }
 
-/**
- * 単一モデルの疎通テスト
- * タイムアウト付き（5秒）
- */
-async function _testModel(modelName, apiKey) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 5000);
-  try {
-    const res = await fetch(
-      `${GEMINI_BASE_URL}/models/${modelName}:generateContent?key=${encodeURIComponent(apiKey)}`,
+/* ── model cache ────────────────────────────────────────────────────── */
+function _loadCachedModel(){
+  try{
+    const raw = localStorage.getItem(MODEL_CACHE_KEY);
+    if(!raw) return null;
+    const {model, ts} = JSON.parse(raw);
+    if(Date.now()-ts < MODEL_CACHE_TTL) return model;
+  }catch(_){}
+  return null;
+}
+function _saveModel(model){
+  try{ localStorage.setItem(MODEL_CACHE_KEY, JSON.stringify({model, ts:Date.now()})); }catch(_){}
+}
+function clearModelCache(){
+  try{ localStorage.removeItem(MODEL_CACHE_KEY); }catch(_){}
+}
+
+/* ── probe a single model (5 s timeout) ────────────────────────────── */
+async function _probeModel(model, apiKey){
+  const ctrl = new AbortController();
+  const tid  = setTimeout(() => ctrl.abort(), 5000);
+  try{
+    const r = await fetch(
+      `${BASE_URL}/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`,
       {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: 'hi' }] }],
-          generationConfig: { maxOutputTokens: 8 }
-        }),
-        signal: controller.signal
+        method : 'POST',
+        headers: {'Content-Type':'application/json'},
+        signal : ctrl.signal,
+        body   : JSON.stringify({
+          contents:[{parts:[{text:'Reply with the single word: ready'}]}],
+          generationConfig:{maxOutputTokens:10}
+        })
       }
     );
-    clearTimeout(timer);
-    return res.ok || res.status === 429;
-  } catch {
-    clearTimeout(timer);
+    clearTimeout(tid);
+    return r.ok;
+  }catch(e){
+    clearTimeout(tid);
     return false;
   }
 }
 
-/**
- * 上位N個を並列テストし、最速で応答した合格モデルを返す
- * 優先度順を守るため、並列結果を優先度順でフィルタリング
- */
-async function _testModelsParallel(candidates, apiKey, topN = 3) {
-  // 優先度上位 topN 個を並列テスト
-  const top = candidates.slice(0, topN);
-  console.log('[Gemini] 並列テスト対象:', top);
-
-  const results = await Promise.all(
-    top.map(async model => ({
-      model,
-      ok: await _testModel(model, apiKey)
-    }))
-  );
-
-  // 優先度順（元のcandidates順）で最初に合格したものを返す
-  for (const model of top) {
-    const r = results.find(r => r.model === model);
-    if (r && r.ok) return model;
-  }
-
-  // 上位が全滅した場合、残りをシリアルでテスト
-  for (const model of candidates.slice(topN)) {
-    console.log('[Gemini] フォールバックテスト:', model);
-    if (await _testModel(model, apiKey)) return model;
-  }
-
-  return null;
+/* ── fetch available models from API ───────────────────────────────── */
+async function _fetchAvailableModels(apiKey){
+  try{
+    const r = await fetch(`${BASE_URL}/models?key=${encodeURIComponent(apiKey)}`);
+    if(!r.ok) return null;
+    const data = await r.json();
+    return (data.models||[])
+      .filter(m => (m.supportedGenerationMethods||[]).includes('generateContent'))
+      .map(m => m.name.replace('models/',''));
+  }catch(_){ return null; }
 }
 
-function loadCachedModel() {
-  try {
-    const raw = localStorage.getItem(MODEL_CACHE_KEY);
-    if (!raw) return null;
-    const { model, timestamp } = JSON.parse(raw);
-    if (Date.now() - timestamp > MODEL_CACHE_TTL) {
-      localStorage.removeItem(MODEL_CACHE_KEY);
-      return null;
+/* ── resolve best available model (preferred → fallback list) ───────── */
+async function resolveModel(apiKey){
+  const cached = _loadCachedModel();
+  if(cached){ console.log(`[gemini] Using cached model: ${cached}`); return cached; }
+
+  // Try preferred model first
+  console.log(`[gemini] Probing preferred model: ${PREFERRED_MODEL}`);
+  if(await _probeModel(PREFERRED_MODEL, apiKey)){
+    console.log(`[gemini] Selected preferred: ${PREFERRED_MODEL}`);
+    _saveModel(PREFERRED_MODEL);
+    return PREFERRED_MODEL;
+  }
+
+  // Fetch available models from API
+  const available = await _fetchAvailableModels(apiKey);
+  let candidates = FALLBACK_MODELS.slice();
+  if(available){
+    // Prioritise models that appear in the API list
+    const apiSet = new Set(available);
+    const known  = candidates.filter(m => apiSet.has(m));
+    const extra  = available.filter(m => !candidates.includes(m) && m.startsWith('gemini'));
+    candidates   = [...known, ...extra];
+    console.log(`[gemini] API candidates: ${candidates.slice(0,5).join(', ')}…`);
+  }
+
+  // Probe top-3 in parallel, then remainder serially
+  const top3    = candidates.slice(0,3);
+  const rest    = candidates.slice(3);
+
+  const top3Ok = await Promise.all(top3.map(m => _probeModel(m, apiKey)));
+  for(let i=0;i<top3.length;i++){
+    if(top3Ok[i]){
+      console.log(`[gemini] Selected (parallel probe): ${top3[i]}`);
+      _saveModel(top3[i]);
+      return top3[i];
     }
-    console.log('[Gemini] キャッシュ済みモデル使用:', model);
-    return model;
-  } catch { return null; }
-}
-
-function saveCachedModel(modelName) {
-  try {
-    localStorage.setItem(MODEL_CACHE_KEY, JSON.stringify({
-      model: modelName, timestamp: Date.now()
-    }));
-  } catch {}
-}
-
-function clearModelCache() {
-  try { localStorage.removeItem(MODEL_CACHE_KEY); } catch {}
-}
-
-async function resolveModel(apiKey) {
-  // 1. キャッシュ確認
-  const cached = loadCachedModel();
-  if (cached) return cached;
-
-  let candidates = [...FALLBACK_MODEL_PRIORITY];
-
-  // 2. API からモデル一覧を取得して候補を構築
-  try {
-    const available = await fetchAvailableModels(apiKey);
-    const fromPriority = FALLBACK_MODEL_PRIORITY.filter(m => available.includes(m));
-    const extra = available.filter(
-      m => !FALLBACK_MODEL_PRIORITY.includes(m) &&
-           (m.includes('flash') || m.includes('pro'))
-    );
-    candidates = [...fromPriority, ...extra];
-    console.log('[Gemini] 候補モデル:', candidates);
-  } catch (e) {
-    console.warn('[Gemini] モデル一覧取得失敗、フォールバックリストを使用:', e.message);
+  }
+  for(const m of rest){
+    if(await _probeModel(m, apiKey)){
+      console.log(`[gemini] Selected (serial probe): ${m}`);
+      _saveModel(m);
+      return m;
+    }
   }
 
-  // 3. 並列テストで最速採用（優先度は維持）
-  const selected = await _testModelsParallel(candidates, apiKey, 3);
-
-  if (selected) {
-    console.log('[Gemini] 採用モデル:', selected);
-    saveCachedModel(selected);
-    return selected;
-  }
-
-  // 4. 全失敗 → フォールバック先頭
-  console.warn('[Gemini] 全テスト失敗。フォールバック先頭:', FALLBACK_MODEL_PRIORITY[0]);
-  return FALLBACK_MODEL_PRIORITY[0];
+  console.warn('[gemini] No reachable model found, defaulting to gemini-2.0-flash');
+  return 'gemini-2.0-flash';
 }
 
-/* ============================================================
-   プロンプト生成
-   ============================================================ */
-function buildPrompt(level, count, gridN) {
-  const maxCoord = gridN - 1;
-  const spec = {
-    0: { lines: '4',    crossMin: 1, crossMax: 2,
-         note: 'lines配列の最初の3本がヒントとして表示される（4本目だけユーザーが描く）' },
-    1: { lines: '4',    crossMin: 1, crossMax: 3,
-         note: 'lines配列の最初の2本がヒントとして表示される' },
-    2: { lines: '4か5', crossMin: 3, crossMax: 5,
-         note: 'ヒントなし。交差が多い複雑な図形にすること' },
-    3: { lines: '5〜7', crossMin: 0, crossMax: 99,
-         note: 'ヒントなし。5x5グリッドを広く使う複雑な図形' },
-  }[level] ?? { lines: '4', crossMin: 1, crossMax: 3, note: '' };
+/* ── build generation prompt ────────────────────────────────────────── */
+function _buildPrompt(level, count){
+  const cfg   = LEVEL_CFG[level] || LEVEL_CFG[1];
+  const {lines: lineCount, gridN, lo, hi} = cfg;
+  const maxCoord = gridN;
 
-  return `あなたは幼児向け図形パズルの問題作成AIです。
-Lv${level}の問題を${count}問、以下の仕様で作成してください。
+  return `You are generating line puzzle problems for a visual math game.
 
-【グリッド】${gridN}x${gridN}（座標は整数 x:0〜${maxCoord}, y:0〜${maxCoord}）
-【線の本数】${spec.lines}本
-【補足】${spec.note}
+Rules:
+- Each problem has exactly ${lineCount} line segments on a ${maxCoord+1}x${maxCoord+1} grid.
+- All coordinates are integers in the range [0, ${maxCoord}] (inclusive).
+- No zero-length lines (x1==x2 AND y1==y2 is forbidden).
+- The number of STRICT INTERNAL intersections must be between ${lo} and ${hi} (inclusive).
+  - "Strict internal" means two segments cross at a point that is interior to BOTH segments.
+  - Shared endpoints do NOT count as intersections.
+  - A point touching only one segment's endpoint does NOT count.
+- Generate exactly ${count} distinct problems.
 
-【交差数の厳守ルール（最重要）】
-"端点を共有しない2線分が内部で交わること"を1交差とする。
-端点が一致する場合（折れ線の節点）は交差にカウントしない。
-必ず交差数が${spec.crossMin}〜${spec.crossMax}になるよう設計すること。
+Self-check before outputting:
+1. For every pair of lines, determine if they strictly internally intersect.
+2. Count the total intersections for the problem.
+3. Confirm the count is in [${lo}, ${hi}].
+4. If not, adjust the lines and recheck.
 
-【禁止】
-- 全線が水平のみ・垂直のみ
-- 正方形・長方形（4辺ボックス）のみの図形
-- 長さゼロの線（始点と終点が同一）
-- 座標範囲外の値
-
-【出力形式】
-JSON配列のみ。説明・コードブロック不要。[ で始まり ] で終わること。
+Output ONLY a JSON array, no markdown, no explanation:
 [
-  {"lines":[{"x1":0,"y1":0,"x2":2,"y2":3},...]},
-  ...
+  { "lines": [
+      {"x1":0,"y1":0,"x2":2,"y2":3},
+      ...${lineCount} lines total...
+  ]},
+  ...${count} problems total...
 ]`;
 }
 
-/* ============================================================
-   公開: 問題生成メイン
-   ============================================================ */
-async function generateProblems(level, count, apiKey) {
-  if (!apiKey) throw new Error('APIキーが設定されていません');
+/* ── embedded fallback bank ─────────────────────────────────────────── */
+const _FALLBACK = {
+  0: [
+    {lines:[{x1:0,y1:0,x2:3,y2:0},{x1:0,y1:1,x2:3,y2:1},{x1:0,y1:2,x2:3,y2:2},{x1:0,y1:3,x2:3,y2:3}]},
+    {lines:[{x1:0,y1:0,x2:0,y2:3},{x1:1,y1:0,x2:1,y2:3},{x1:2,y1:0,x2:2,y2:3},{x1:3,y1:0,x2:3,y2:3}]},
+    {lines:[{x1:0,y1:0,x2:1,y2:3},{x1:1,y1:0,x2:0,y2:3},{x1:2,y1:0,x2:3,y2:1},{x1:2,y1:2,x2:3,y2:3}]},
+    {lines:[{x1:0,y1:0,x2:1,y2:3},{x1:1,y1:0,x2:0,y2:3},{x1:2,y1:0,x2:3,y2:3},{x1:3,y1:0,x2:2,y2:3}]},
+    {lines:[{x1:0,y1:0,x2:3,y2:1},{x1:0,y1:1,x2:3,y2:0},{x1:0,y1:2,x2:1,y2:3},{x1:1,y1:2,x2:0,y2:3}]}
+  ],
+  1: [
+    {lines:[{x1:0,y1:0,x2:3,y2:0},{x1:0,y1:1,x2:3,y2:1},{x1:0,y1:2,x2:3,y2:2},{x1:0,y1:3,x2:3,y2:3}]},
+    {lines:[{x1:0,y1:0,x2:1,y2:3},{x1:1,y1:0,x2:0,y2:3},{x1:2,y1:0,x2:3,y2:1},{x1:2,y1:2,x2:3,y2:3}]},
+    {lines:[{x1:0,y1:0,x2:1,y2:3},{x1:1,y1:0,x2:0,y2:3},{x1:2,y1:0,x2:3,y2:3},{x1:3,y1:0,x2:2,y2:3}]},
+    {lines:[{x1:0,y1:0,x2:3,y2:2},{x1:0,y1:2,x2:3,y2:0},{x1:1,y1:0,x2:0,y2:3},{x1:3,y1:2,x2:3,y2:3}]},
+    {lines:[{x1:0,y1:1,x2:3,y2:2},{x1:0,y1:2,x2:3,y2:1},{x1:0,y1:0,x2:3,y2:3},{x1:2,y1:0,x2:3,y2:0}]}
+  ],
+  2: [
+    {lines:[{x1:0,y1:0,x2:1,y2:3},{x1:1,y1:0,x2:0,y2:3},{x1:2,y1:0,x2:3,y2:3},{x1:3,y1:0,x2:2,y2:3}]},
+    {lines:[{x1:0,y1:0,x2:3,y2:2},{x1:0,y1:2,x2:3,y2:0},{x1:1,y1:0,x2:2,y2:3},{x1:0,y1:3,x2:1,y2:3}]},
+    {lines:[{x1:0,y1:0,x2:2,y2:3},{x1:2,y1:0,x2:0,y2:3},{x1:1,y1:1,x2:3,y2:3},{x1:3,y1:0,x2:1,y2:2}]},
+    {lines:[{x1:0,y1:0,x2:3,y2:3},{x1:0,y1:3,x2:3,y2:0},{x1:0,y1:1,x2:3,y2:2},{x1:0,y1:2,x2:3,y2:2}]},
+    {lines:[{x1:0,y1:0,x2:3,y2:2},{x1:0,y1:2,x2:3,y2:0},{x1:0,y1:3,x2:3,y2:1},{x1:0,y1:1,x2:3,y2:3}]}
+  ],
+  3: [
+    {lines:[{x1:0,y1:0,x2:4,y2:4},{x1:0,y1:4,x2:4,y2:0},{x1:0,y1:2,x2:4,y2:2},{x1:2,y1:0,x2:2,y2:4},{x1:0,y1:1,x2:4,y2:3}]},
+    {lines:[{x1:0,y1:0,x2:4,y2:3},{x1:0,y1:3,x2:4,y2:0},{x1:1,y1:0,x2:3,y2:4},{x1:3,y1:0,x2:1,y2:4},{x1:0,y1:4,x2:4,y2:4}]},
+    {lines:[{x1:0,y1:0,x2:4,y2:4},{x1:0,y1:4,x2:4,y2:0},{x1:0,y1:1,x2:4,y2:1},{x1:0,y1:3,x2:4,y2:3},{x1:2,y1:0,x2:2,y2:4}]},
+    {lines:[{x1:0,y1:0,x2:3,y2:4},{x1:1,y1:0,x2:4,y2:4},{x1:0,y1:4,x2:3,y2:0},{x1:1,y1:4,x2:4,y2:0},{x1:0,y1:2,x2:4,y2:2}]},
+    {lines:[{x1:0,y1:1,x2:4,y2:3},{x1:0,y1:3,x2:4,y2:1},{x1:1,y1:0,x2:3,y2:4},{x1:3,y1:0,x2:1,y2:4},{x1:0,y1:0,x2:4,y2:4}]}
+  ]
+};
 
-  // ★ gridN をここで一度だけ確定し、関数スコープ全体で使用
-  const gridN = level === 3 ? 5 : 4;
+function _getFallback(level, count){
+  const pool = (
+    typeof PROBLEM_BANK !== 'undefined' && PROBLEM_BANK[level]
+      ? PROBLEM_BANK[level]
+      : _FALLBACK[level] || _FALLBACK[1]
+  ).slice();
+  // shuffle
+  for(let i=pool.length-1;i>0;i--){
+    const j=Math.floor(Math.random()*(i+1));
+    [pool[i],pool[j]]=[pool[j],pool[i]];
+  }
+  // attach hintLines if missing
+  const cfg = LEVEL_CFG[level]||LEVEL_CFG[1];
+  return pool.slice(0,count).map(p => ({
+    level,
+    grid: {cols: cfg.gridN+1, rows: cfg.gridN+1},
+    lines: p.lines,
+    hintLines: p.hintLines || Array.from({length:cfg.hints},(_,i)=>i)
+  }));
+}
 
-  const modelName = await resolveModel(apiKey);
-  console.log('[Gemini] 使用モデル:', modelName);
+/* ── main generation function ───────────────────────────────────────── */
+async function generateProblems(level, count, apiKey){
+  if(!apiKey){
+    console.warn('[gemini] No API key – using fallback bank');
+    return _getFallback(level, count);
+  }
 
-  const MAX_RETRY    = 5;
-  const validResults = [];
+  let model;
+  try{ model = await resolveModel(apiKey); }
+  catch(e){
+    console.error('[gemini] resolveModel failed:', e);
+    return _getFallback(level, count);
+  }
 
-  for (let attempt = 0; attempt < MAX_RETRY; attempt++) {
-    const needed = count - validResults.length;
-    if (needed <= 0) break;
+  const MAX_ATTEMPTS = 5;
+  const collected    = [];
 
-    console.log(`[Gemini] attempt ${attempt + 1}/${MAX_RETRY}: ${needed}問リクエスト`);
+  for(let attempt=1; attempt<=MAX_ATTEMPTS && collected.length<count; attempt++){
+    const need   = count - collected.length;
+    const prompt = _buildPrompt(level, need);
 
-    try {
-      const res = await fetch(
-        `${GEMINI_BASE_URL}/models/${modelName}:generateContent?key=${encodeURIComponent(apiKey)}`,
+    console.log(`[gemini] Attempt ${attempt}/${MAX_ATTEMPTS} model=${model} need=${need}`);
+
+    let raw;
+    try{
+      const resp = await fetch(
+        `${BASE_URL}/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`,
         {
-          method:  'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: buildPrompt(level, needed, gridN) }] }],
-            generationConfig: {
-              temperature:     0.9,
-              topP:            0.95,
-              maxOutputTokens: 4096,
-              thinkingConfig:  { thinkingBudget: 0 }
+          method : 'POST',
+          headers: {'Content-Type':'application/json'},
+          body   : JSON.stringify({
+            contents:[{parts:[{text:prompt}]}],
+            generationConfig:{
+              temperature      : 0.7,
+              maxOutputTokens  : 2048,
+              responseMimeType : 'application/json'
             }
           })
         }
       );
 
-      if (!res.ok) {
-        if (res.status === 429) {
-          console.warn('[Gemini] 429: 2秒待機');
-          await new Promise(r => setTimeout(r, 2000));
-          continue;
-        }
+      if(resp.status===429){
+        console.warn('[gemini] Rate limited, waiting 3 s…');
+        await new Promise(r=>setTimeout(r,3000));
+        continue;
+      }
+      if(resp.status===403||resp.status===400){
+        console.error(`[gemini] HTTP ${resp.status} – clearing cache`);
         clearModelCache();
-        let msg = `Gemini APIエラー: ${res.status}`;
-        try {
-          const ej = await res.json();
-          const d  = ej?.error?.message || '';
-          if (res.status === 400) msg = `APIキー/モデル無効(400):\n${d}`;
-          if (res.status === 403) msg = `APIキー権限なし(403):\n${d}`;
-        } catch {}
-        throw new Error(msg);
+        break;
       }
-
-      const data  = await res.json();
-      const parts = data?.candidates?.[0]?.content?.parts || [];
-      const text  = parts
-        .filter(p => p.text && !p.thought)
-        .map(p => p.text)
-        .join('')
-        .trim();
-
-      if (!text) {
-        console.warn('[Gemini] レスポンスにテキストなし');
+      if(!resp.ok){
+        console.warn(`[gemini] HTTP ${resp.status}`);
         continue;
       }
 
-      let rawArray;
-      try {
-        let cleaned = text
-          .replace(/```(?:json)?\s*/gi, '')
-          .replace(/```/g, '')
-          .trim();
-        const s = cleaned.indexOf('[');
-        const e = cleaned.lastIndexOf(']');
-        if (s === -1 || e === -1) throw new Error('JSON配列なし');
-        rawArray = JSON.parse(cleaned.slice(s, e + 1));
-      } catch (e) {
-        console.warn('[Gemini] JSON解析失敗:', e.message, text.slice(0, 200));
+      const data = await resp.json();
+      const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+
+      // Extract JSON array from response
+      const match = text.match(/\[[\s\S]*\]/);
+      if(!match){ console.warn('[gemini] No JSON array in response'); continue; }
+      raw = JSON.parse(match[0]);
+      if(!Array.isArray(raw)){ continue; }
+    }catch(e){
+      console.error('[gemini] Fetch/parse error:', e);
+      continue;
+    }
+
+    // Validate each candidate
+    for(const candidate of raw){
+      if(collected.length >= count) break;
+      const p = _normalise(candidate, level);
+      if(!p){
+        console.log('[gemini] Normalise failed (wrong line count or zero-length)');
         continue;
       }
-      if (!Array.isArray(rawArray)) {
-        console.warn('[Gemini] レスポンスが配列でない');
+      const n = _countCross(p.lines);
+      const {lo,hi} = LEVEL_CFG[level]||LEVEL_CFG[1];
+      if(n < lo || n > hi){
+        console.log(`[gemini] Rejected: cross=${n}, need [${lo},${hi}]`);
         continue;
       }
-
-      // ---- 正規化 & 交差数バリデーション ----
-      for (const raw of rawArray) {
-        if (validResults.length >= count) break;
-
-        // ★ gridN を引数で明示的に渡す（変数シャドウイング完全排除）
-        const problem = _gNormalize(raw, level, gridN, gridN);
-
-        if (problem.lines.length < 2) {
-          console.warn('[Gemini] 線が少なすぎ（スキップ）:', problem.lines.length, '本');
-          continue;
-        }
-
-        const crossCount = _gCountCross(problem.lines);
-        const ok         = _gValidateCross(problem.lines, level);
-
-        console.log(
-          `[Gemini] 候補 #${validResults.length + 1}: ` +
-          `交差=${crossCount} 制限=${_gCrossLimitStr(level)} ` +
-          (ok ? '✅ 合格' : `❌ 不合格（交差${crossCount}は範囲外）`)
-        );
-
-        if (ok) validResults.push(problem);
-      }
-
-      console.log(
-        `[Gemini] attempt ${attempt + 1} 完了: ` +
-        `合格 ${validResults.length}/${count}`
-      );
-
-    } catch (e) {
-      if (e.message.includes('APIキー') || e.message.includes('権限') ||
-          e.message.includes('無効(400)') || e.message.includes('権限なし(403)')) {
-        throw e;
-      }
-      console.warn(`[Gemini] attempt ${attempt + 1} 例外:`, e.message);
+      console.log(`[gemini] Accepted: cross=${n} ✓`);
+      collected.push(p);
     }
   }
 
-  // ---- フォールバック補完 ----
-  if (validResults.length < count) {
-    const shortage = count - validResults.length;
-    console.warn(
-      `[Gemini] 合格問題不足 (${validResults.length}/${count})。` +
-      `フォールバックから${shortage}問補完`
-    );
-
-    const pool = _getFallbackPool(level).sort(() => Math.random() - 0.5);
-
-    for (const fb of pool) {
-      if (validResults.length >= count) break;
-      // ★ フォールバックも _gNormalize で gridN を明示
-      const fn = (typeof normalizeProblem === 'function')
-        ? (raw) => normalizeProblem(raw, level)
-        : (raw) => _gNormalize(raw, level, gridN, gridN);
-      try {
-        validResults.push(fn(fb));
-      } catch (e) {
-        console.warn('[Gemini] フォールバック正規化失敗:', e.message);
-      }
-    }
+  if(collected.length < count){
+    console.warn(`[gemini] Only ${collected.length}/${count} valid – padding with fallback`);
+    const pad = _getFallback(level, count - collected.length);
+    collected.push(...pad);
   }
 
-  if (validResults.length === 0) {
-    throw new Error(
-      '問題を生成できませんでした。' +
-      'APIキーを確認するか、しばらく待ってから再試行してください。'
-    );
-  }
-
-  return validResults.slice(0, count);
+  return collected.slice(0, count);
 }
 
-/* ============================================================
-   APIキー管理
-   ============================================================ */
-function saveApiKey(key) {
-  try { localStorage.setItem('gemini_api_key', key); } catch {}
+/* ── API key helpers ────────────────────────────────────────────────── */
+function saveApiKey(key){
+  try{ localStorage.setItem('gemini_api_key', key); }catch(_){}
   clearModelCache();
 }
-
-function loadApiKey() {
-  try { return localStorage.getItem('gemini_api_key') || ''; }
-  catch { return ''; }
+function loadApiKey(){
+  try{ return localStorage.getItem('gemini_api_key') || ''; }catch(_){ return ''; }
 }
+
+/* ── public surface ─────────────────────────────────────────────────── */
+return { generateProblems, resolveModel, saveApiKey, loadApiKey, clearModelCache };
+
+})(); // end _G IIFE
+
+/* Re-export at module level for callers expecting flat names */
+const generateProblems = _G.generateProblems;
+const resolveModel     = _G.resolveModel;
+const saveApiKey       = _G.saveApiKey;
+const loadApiKey       = _G.loadApiKey;
+const clearModelCache  = _G.clearModelCache;
