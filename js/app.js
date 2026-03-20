@@ -315,9 +315,10 @@ async function startGame() {
     try {
       // ── 全体タイムアウトガード（60秒）────────────────────────────
       // generateProblems() が内部のいずれかのステップで無限待機した場合に
-      // 強制的にタイムアウトさせる二重の安全網。
-      // gemini.js v4.1 の _fetchAvailableModels タイムアウトと合わせて
-      // 二層の防護として機能する。
+      // 強制的にタイムアウトさせる安全網。
+      // FALLBACK_MODEL_CHAIN の全モデル（最大3モデル×5試行）の
+      // 最悪ケースを考慮して十分な余裕を持たせた値。
+      // タイムアウト時は alert でユーザーに案内し、内蔵問題で継続する。
       const timeoutPromise = new Promise((_, reject) =>
         setTimeout(
           () => reject(new Error('問題生成がタイムアウトしました（60秒）。\n内蔵問題を使用します。')),
