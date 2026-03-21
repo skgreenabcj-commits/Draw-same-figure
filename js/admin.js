@@ -331,11 +331,15 @@ function initLogSection() {
 /* ========================================================
    §4. gemini.js へのステータス永続化パッチ
    ──────────────────────────────────────────────────────
-   gemini.js の _updateStatus が window._geminiStatus を更新するとき
-   localStorage にも書き込むよう、geminiStatusUpdate イベントを
-   admin.html 内でも購読してキャッシュに保存する。
-   （ゲーム画面側で発火したイベントは admin.html には届かないが、
-     admin.html を開いているセッションで直接 AI 生成した場合に反映される）
+/*
+ * ゲーム画面(index.html)側で発生した geminiStatusUpdate イベントは
+ * admin.html には届きません（別ページのため）。
+ * ゲームプレイ後にこのページを開く/更新すると、gemini.js が
+ * localStorage('gemini_admin_status_v1') に書き込んだデータを
+ * _loadAdminStatus() で読み込んで表示します。
+ * 以下のリスナーは admin.html 上で直接 fetchLiveModels() 等を
+ * 呼び出した際のみ発火します。
+ */
    ======================================================== */
 window.addEventListener('geminiStatusUpdate', (e) => {
   const s = e.detail;
