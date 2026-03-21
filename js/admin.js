@@ -327,7 +327,6 @@ function initLogSection() {
 /* ========================================================
    §4. gemini.js へのステータス永続化パッチ
    ──────────────────────────────────────────────────────
-/*
  * ゲーム画面(index.html)側で発生した geminiStatusUpdate イベントは
  * admin.html には届きません（別ページのため）。
  * ゲームプレイ後にこのページを開く/更新すると、gemini.js が
@@ -335,7 +334,6 @@ function initLogSection() {
  * _loadAdminStatus() で読み込んで表示します。
  * 以下のリスナーは admin.html 上で直接 fetchLiveModels() 等を
  * 呼び出した際のみ発火します。
- */
    ======================================================== */
 window.addEventListener('geminiStatusUpdate', (e) => {
   const s = e.detail;
