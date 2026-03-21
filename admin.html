@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>管理者設定 — ずけい れんしゅう</title>
+  <link rel="stylesheet" href="css/style.css" />
+  <link rel="stylesheet" href="css/admin.css" />
+  <link href="https://fonts.googleapis.com/css2?family=M+PLUS+Rounded+1c:wght@400;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css" />
+  <link rel="icon" href="data:,">
+</head>
+<body class="admin-body">
+
+  <div class="admin-page">
+
+    <!-- ヘッダー -->
+    <header class="admin-header">
+      <h1 class="admin-header-title">🛠️ 管理者設定</h1>
+      <a href="index.html" class="admin-back-link">
+        <i class="fa fa-arrow-left"></i> ゲームに戻る
+      </a>
+    </header>
+
+    <!-- ==============================
+         セクション 1: Gemini APIキー
+         ============================== -->
+    <section class="admin-section" id="section-apikey">
+      <h2 class="admin-section-title">
+        <i class="fa fa-key"></i> Gemini APIキー設定
+      </h2>
+      <div class="admin-section-body">
+        <p class="admin-desc">
+          Gemini APIキーを設定すると、AIが自動でゲームの問題を生成します。<br>
+          APIキーは <strong>このブラウザ内にのみ</strong> 保存され、外部送信はされません。
+        </p>
+        <div class="admin-apikey-row">
+          <input id="input-admin-apikey" type="password"
+                 class="admin-input" placeholder="AIzaSy..." autocomplete="off" />
+          <button id="btn-admin-apikey-show" class="admin-btn-icon" title="表示/非表示">
+            <i class="fa fa-eye" id="apikey-eye-icon"></i>
+          </button>
+          <button id="btn-admin-apikey-save" class="admin-btn-primary">
+            <i class="fa fa-save"></i> 保存
+          </button>
+        </div>
+        <p id="apikey-status" class="admin-status-msg"></p>
+      </div>
+    </section>
+
+    <!-- ==============================
+         セクション 2: AIモデル優先順位
+         ============================== -->
+    <section class="admin-section" id="section-models">
+      <h2 class="admin-section-title">
+        <i class="fa fa-robot"></i> AIモデル優先順位
+      </h2>
+      <div class="admin-section-body">
+        <p class="admin-desc">
+          問題生成に使用するAIモデルの優先順位を設定します。<br>
+          <strong>第1優先</strong> のモデルを最初に試み、失敗した場合に順次切り替えます。<br>
+          <span class="admin-recommend-note">★ flash-lite を含むモデルが推奨です（高速・無償枠対応）</span>
+        </p>
+
+        <!-- モデル取得ボタン -->
+        <button id="btn-fetch-models" class="admin-btn-secondary">
+          <i class="fa fa-sync"></i> 利用可能モデルを取得
+        </button>
+        <p id="models-fetch-status" class="admin-status-msg"></p>
+
+        <!-- 優先順位セレクター -->
+        <div class="admin-priority-grid" id="priority-grid">
+          <!-- 第1優先 -->
+          <div class="admin-priority-row">
+            <div class="admin-priority-label">
+              <span class="priority-badge priority-1">第1優先</span>
+            </div>
+            <select id="select-model-1" class="admin-select" disabled>
+              <option value="">— モデルを取得してください —</option>
+            </select>
+            <span class="priority-note" id="note-model-1"></span>
+          </div>
+          <!-- 第2優先 -->
+          <div class="admin-priority-row">
+            <div class="admin-priority-label">
+              <span class="priority-badge priority-2">第2優先</span>
+            </div>
+            <select id="select-model-2" class="admin-select" disabled>
+              <option value="">— なし —</option>
+            </select>
+            <span class="priority-note" id="note-model-2"></span>
+          </div>
+          <!-- 第3優先 -->
+          <div class="admin-priority-row">
+            <div class="admin-priority-label">
+              <span class="priority-badge priority-3">第3優先</span>
+            </div>
+            <select id="select-model-3" class="admin-select" disabled>
+              <option value="">— なし —</option>
+            </select>
+            <span class="priority-note" id="note-model-3"></span>
+          </div>
+        </div>
+
+        <!-- 保存ボタン -->
+        <div class="admin-save-row">
+          <button id="btn-save-chain" class="admin-btn-primary" disabled>
+            <i class="fa fa-save"></i> 優先順位を保存
+          </button>
+          <button id="btn-clear-chain" class="admin-btn-danger">
+            <i class="fa fa-trash"></i> 設定をリセット
+          </button>
+        </div>
+        <p id="chain-save-status" class="admin-status-msg"></p>
+
+        <!-- 現在の有効チェーン表示 -->
+        <div class="admin-current-chain" id="current-chain-display" style="display:none">
+          <p class="admin-current-chain-label">現在の有効チェーン：</p>
+          <div id="current-chain-badges" class="chain-badges"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==============================
+         セクション 3: 実行ログ / エラー
+         ============================== -->
+    <section class="admin-section" id="section-logs">
+      <h2 class="admin-section-title">
+        <i class="fa fa-list-alt"></i> 実行ログ・エラー状況
+      </h2>
+      <div class="admin-section-body">
+        <p class="admin-desc">
+          最新のAI生成ステータスとエラー履歴を表示します。<br>
+          ゲーム画面でAI生成を実行後、このページを再度開くか更新すると最新情報が反映されます。
+        </p>
+
+        <!-- ステータスカード -->
+        <div class="admin-status-cards" id="status-cards">
+          <div class="status-card" id="card-error-count">
+            <div class="status-card-icon status-card-icon--error">
+              <i class="fa fa-exclamation-triangle"></i>
+            </div>
+            <div class="status-card-body">
+              <div class="status-card-value" id="val-error-count">—</div>
+              <div class="status-card-label">累計エラー回数</div>
+            </div>
+          </div>
+          <div class="status-card" id="card-last-model">
+            <div class="status-card-icon status-card-icon--ok">
+              <i class="fa fa-check-circle"></i>
+            </div>
+            <div class="status-card-body">
+              <div class="status-card-value" id="val-last-model">—</div>
+              <div class="status-card-label">直近の成功モデル</div>
+            </div>
+          </div>
+          <div class="status-card" id="card-needs-redo">
+            <div class="status-card-icon status-card-icon--warn">
+              <i class="fa fa-tools"></i>
+            </div>
+            <div class="status-card-body">
+              <div class="status-card-value" id="val-needs-redo">—</div>
+              <div class="status-card-label">設定更新が必要</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 直近エラーメッセージ -->
+        <div class="admin-last-error" id="last-error-box" style="display:none">
+          <p class="admin-last-error-title">
+            <i class="fa fa-exclamation-circle"></i> 直近のエラー
+          </p>
+          <p id="last-error-msg" class="admin-last-error-msg"></p>
+          <p class="admin-last-error-action" id="last-error-action"></p>
+        </div>
+
+        <!-- ログ一覧 -->
+        <div class="admin-log-header">
+          <span class="admin-log-title">ログ履歴</span>
+          <button id="btn-clear-log" class="admin-btn-text">
+            <i class="fa fa-trash"></i> ログをクリア
+          </button>
+        </div>
+        <div id="admin-log-list" class="admin-log-list">
+          <p class="admin-log-empty">ログはまだありません。<br>ゲームでAI生成を行うとここに記録されます。</p>
+        </div>
+
+        <!-- 更新ボタン -->
+        <button id="btn-refresh-status" class="admin-btn-secondary" style="margin-top:12px">
+          <i class="fa fa-sync"></i> ステータスを更新
+        </button>
+      </div>
+    </section>
+
+  </div><!-- /.admin-page -->
+
+  <!-- gemini.js のみ読み込む（app.js / canvas.js 不要） -->
+  <script src="js/gemini.js"></script>
+  <script src="js/admin.js"></script>
+</body>
+</html>
