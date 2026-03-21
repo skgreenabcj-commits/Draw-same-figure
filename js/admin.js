@@ -6,7 +6,8 @@
  *                  saveAdminChain, loadAdminChain, clearAdminChain,
  *                  clearModelCache）
  */
-
+const ADMIN_STATUS_KEY_LOCAL = 'gemini_admin_status_v1'; // gemini.js の ADMIN_STATUS_KEY と同値
+const MODEL_CACHE_KEY_LOCAL  = 'gemini_model_v3';        // gemini.js の MODEL_CACHE_KEY と同値
 /* ========================================================
    ログストレージ
    ======================================================== */
