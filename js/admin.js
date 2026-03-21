@@ -292,15 +292,10 @@ function refreshStatus() {
 function _loadAdminStatus() {
   const base = { errorCount: 0, lastError: '', needsAdminRedo: false, lastSuccessModel: '' };
   try {
-    const raw = localStorage.getItem('gemini_admin_status_v1');
+    const raw = localStorage.getItem(ADMIN_STATUS_KEY_LOCAL);
     if (raw) return { ...base, ...JSON.parse(raw) };
   } catch(_) {}
-  // MODEL_CACHE_KEY から直近の成功モデルを補完
-  try {
-    const mc = JSON.parse(localStorage.getItem('gemini_model_v3') || '{}');
-    if (mc.model) base.lastSuccessModel = mc.model;
-  } catch(_) {}
-  return base;
+  return base; // gemini_model_v3 補完ブロックを削除（Fix-I により不要）
 }
 
 function renderLog() {
