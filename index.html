@@ -11,24 +11,8 @@
 </head>
 <body>
 
-  <!-- ===== エラー・通知バナー ===== -->
-  <!-- gemini.js の window._geminiStatus 変化時に app.js が内容を更新する -->
-  <!-- クリックで管理者モデル設定パネルを開く -->
+  <!-- エラー・通知バナー（クリックでadmin.htmlを開く） -->
   <div id="model-error-banner" class="model-error-banner hidden"></div>
-
-  <!-- ===== 管理者モデル設定パネル ===== -->
-  <div id="admin-model-panel" class="admin-panel hidden">
-    <h3 class="admin-panel-title">🤖 AIモデル設定</h3>
-    <p class="admin-panel-desc">
-      使用するAIモデルを選択してください。<br>
-      チェックした上から順に優先して使用されます。
-    </p>
-    <div id="admin-model-list" class="admin-model-list"></div>
-    <div class="admin-panel-actions">
-      <button id="btn-admin-model-close" class="btn-sub">キャンセル</button>
-      <button id="btn-admin-model-save" class="btn-primary">保存する</button>
-    </div>
-  </div>
 
   <!-- ===== スタート画面 ===== -->
   <div id="screen-start" class="screen active">
@@ -40,31 +24,26 @@
       <div class="level-select">
         <p class="level-label">レベルを えらんでね</p>
         <div class="level-buttons">
-
           <button class="level-btn" data-level="0">
             <span class="lv-icon">🌟</span>
             <span class="lv-name">レベル０</span>
             <span class="lv-desc">4×4 ・ さいしょの１ぽん</span>
           </button>
-
           <button class="level-btn" data-level="1">
             <span class="lv-icon">⭐</span>
             <span class="lv-name">レベル１</span>
             <span class="lv-desc">4×4 ・ ヒントあり</span>
           </button>
-
           <button class="level-btn" data-level="2">
             <span class="lv-icon">⭐⭐</span>
             <span class="lv-name">レベル２</span>
             <span class="lv-desc">4×4 ・ ぜんぶかく</span>
           </button>
-
           <button class="level-btn" data-level="3">
             <span class="lv-icon">⭐⭐⭐</span>
             <span class="lv-name">レベル３</span>
             <span class="lv-desc">5×5 ・ もっとむずかしい</span>
           </button>
-
         </div>
       </div>
 
@@ -78,7 +57,7 @@
           <button id="btn-save-api" class="btn-small">保存</button>
           <p class="api-note">APIキーはブラウザ内にのみ保存されます</p>
         </div>
-        <!-- 管理者モデル設定ボタン（APIキー設定済み時のみ有効） -->
+        <!-- 管理者設定ボタン → admin.html を別タブで開く -->
         <button id="btn-admin-model" class="btn-text-small admin-model-btn">
           <i class="fa fa-cog"></i> AIモデル設定（管理者）
         </button>
@@ -90,7 +69,6 @@
 
   <!-- ===== 問題画面 ===== -->
   <div id="screen-game" class="screen">
-    <!-- ヘッダー -->
     <header class="game-header">
       <button id="btn-home" class="btn-icon"><i class="fa fa-home"></i></button>
       <div class="progress-area">
@@ -99,16 +77,11 @@
           <div id="progress-bar" class="progress-bar-fill" style="width:20%"></div>
         </div>
       </div>
-      <div class="score-area">
-        <span id="score-text">⭐ 0</span>
-      </div>
+      <div class="score-area"><span id="score-text">⭐ 0</span></div>
     </header>
 
-    <!-- 問題本体 -->
     <main class="game-main">
       <div class="problem-row">
-
-        <!-- 左：みほん -->
         <div class="panel">
           <p class="panel-label">みほん</p>
           <div class="grid-outer" id="grid-outer-model">
@@ -121,8 +94,6 @@
             </div>
           </div>
         </div>
-
-        <!-- 右：回答欄 -->
         <div class="panel">
           <p class="panel-label">かいてみよう</p>
           <div class="grid-outer" id="grid-outer-answer">
@@ -136,15 +107,12 @@
             </div>
           </div>
         </div>
-
       </div>
 
-      <!-- ヒントメッセージ（Lv0 / Lv1 用） -->
       <p id="hint-msg" class="hint-msg hidden">
         のこり<span id="hint-remain"></span>ほんのせんをかこう！
       </p>
 
-      <!-- ボタン行 -->
       <div class="action-row">
         <button id="btn-clear"  class="btn-sub"><i class="fa fa-eraser"></i> ぜんぶけす</button>
         <button id="btn-check"  class="btn-primary"><i class="fa fa-check"></i> こたえあわせ</button>
@@ -152,23 +120,18 @@
       </div>
     </main>
 
-    <!-- 正誤フィードバックオーバーレイ -->
     <div id="feedback-overlay" class="feedback-overlay hidden">
       <div id="feedback-box" class="feedback-box">
         <div id="feedback-wrong" class="hidden">
           <p class="fb-title wrong">もう すこし！</p>
           <p class="fb-desc">みどりせんが　ただしい　せんだよ</p>
           <canvas id="canvas-wrong"></canvas>
-          <button id="btn-next-wrong" class="btn-primary mt16">
-            つぎへ <i class="fa fa-arrow-right"></i>
-          </button>
+          <button id="btn-next-wrong" class="btn-primary mt16">つぎへ <i class="fa fa-arrow-right"></i></button>
         </div>
         <div id="feedback-correct" class="hidden">
           <img src="images/gotit.png" alt="せいかい！" class="gotit-img" />
           <p class="fb-title correct" id="praise-text"></p>
-          <button id="btn-next-correct" class="btn-primary mt16">
-            つぎへ <i class="fa fa-arrow-right"></i>
-          </button>
+          <button id="btn-next-correct" class="btn-primary mt16">つぎへ <i class="fa fa-arrow-right"></i></button>
         </div>
       </div>
     </div>
@@ -189,7 +152,7 @@
     </div>
   </div>
 
-  <!-- ===== AI生成中スピナー ===== -->
+  <!-- AI生成中スピナー -->
   <div id="loading-overlay" class="loading-overlay hidden">
     <div class="loading-box">
       <div class="spinner"></div>
@@ -197,7 +160,6 @@
     </div>
   </div>
 
-  <!-- Scripts -->
   <script src="js/problems.js"></script>
   <script src="js/canvas.js"></script>
   <script src="js/gemini.js"></script>
