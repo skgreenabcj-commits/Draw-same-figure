@@ -1,72 +1,41 @@
 'use strict';
 
 /* =====================================================================
-   gemini.js  v5.6
+   gemini.js  v5.7
    -----------------------------------------------------------------------
-   v5.6 からの変更点（v5.5 → v5.6）:
-     【Fix-G】管理者モデル設定・自動追随・エラー通知機構を追加
-       §1  pro系モデルを完全除外（EXCLUDED_KEYWORDS追加）
-           FETCH_TIMEOUT_MS=8000、MAX_ATTEMPTS=2 でUX最適化
-       §7  _fetchLiveModels: flash系のみ取得・proを除外
-           _buildEffectiveChain: 管理者キャッシュ優先→自動補充
-       §11 連続エラーをカウントし window._geminiStatus で外部通知
-           404/410検出時に管理者設定Redoフラグを立てる
-       §13 generateProblems: エラー累計を window._geminiStatus に格納
-
-   v5.5 の変更点（維持）:
-     【Fix-F】FALLBACK_MODEL_CHAIN 優先順位変更
-
-   v5.4 の変更点（維持）:
-     【Fix-E】_callApi JSONパースロジック全面改修
-
-   v5.3 の変更点（維持）:
-     【Fix-D】コリニア重複対策
-
-   v5.2 の変更点（維持）:
-     【Fix-A/B/C】gridN修正・端点重複除去・プロンプト制約追加
-
-   レベル別制約:
-     Lv0: 制約なし (3本, 4×4, ヒント2本)
-     Lv1: 交差0-5  (4本, 4×4, ヒント2本)
-     Lv2: 交差2-5  (4本, 4×4, ヒントなし)
-     Lv3: 交差0-8  (5本, 5×5, ヒントなし)
-===================================================================== */
+   v5.7 からの変更点（v5.6 → v5.7）:
+     【Fix-H】_fetchLiveModels に image 系モデル除外を追加
+       - EXCLUDED_KEYWORDS = ['pro', 'image'] に変更
+       - admin.html 側のプルダウン連携に対応（FALLBACK_CHAIN 書き換えは
+         saveAdminChain / loadAdminChain で既に対応済み）
+   =====================================================================
+*/
 
 const _G = (() => {
 
-/* ====================================================================
-   § 1. 定数
-==================================================================== */
+/* §1. 定数 */
+const BASE_URL               = 'https://generativelanguage.googleapis.com/v1beta';
+const MODEL_CACHE_KEY        = 'gemini_model_v3';
+const MODEL_CACHE_TTL        = 24 * 60 * 60 * 1000;
+const NO_MIME_CACHE_KEY      = 'gemini_no_mime_v1';
+const NO_MIME_CACHE_TTL      = 7 * 24 * 60 * 60 * 1000;
+const LIVE_MODELS_CACHE_KEY  = 'gemini_live_models_v1';
+const LIVE_MODELS_CACHE_TTL  = 60 * 60 * 1000;
+const ADMIN_CHAIN_KEY        = 'gemini_admin_chain_v1';
 
-const BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
-
-const MODEL_CACHE_KEY       = 'gemini_model_v3';
-const MODEL_CACHE_TTL       = 24 * 60 * 60 * 1000;
-const NO_MIME_CACHE_KEY     = 'gemini_no_mime_v1';
-const NO_MIME_CACHE_TTL     = 7 * 24 * 60 * 60 * 1000;
-const LIVE_MODELS_CACHE_KEY = 'gemini_live_models_v1';
-const LIVE_MODELS_CACHE_TTL = 60 * 60 * 1000;           // 1時間
-const ADMIN_CHAIN_KEY       = 'gemini_admin_chain_v1';   // 管理者設定チェーン
-
-// ── デフォルトチェーン（管理者未設定時のフォールバック）──────────
 const FALLBACK_MODEL_CHAIN = [
   'gemini-2.5-flash-lite',
   'gemini-3.1-flash-lite-preview',
   'gemini-2.5-flash'
 ];
 
-// ── 完全除外キーワード（proを含むモデルは一切使用しない）──────────
-const EXCLUDED_KEYWORDS = ['pro'];
-
-// ── 自動補充優先キーワード（flash系のみ・pro除外）────────────────
+// ── 【Fix-H】 image 系を追加 ──
+const EXCLUDED_KEYWORDS  = ['pro', 'image'];
 const PREFERRED_KEYWORDS = ['flash-lite', 'flash'];
 
-// タイムアウト・試行回数（UX: 最大15秒目標）
 const FETCH_TIMEOUT_MS       = 8000;
 const MAX_429_PER_MODEL      = 2;
 const MAX_ATTEMPTS_PER_MODEL = 2;
-
-// 連続エラー通知しきい値（この回数以上で管理者通知）
 const ERROR_NOTIFY_THRESHOLD = 5;
 
 const LEVEL_CFG = {
@@ -76,376 +45,161 @@ const LEVEL_CFG = {
   3: { lines: 5, gridN: 4, lo: 0, hi: 8, hints: 0 }
 };
 
-/* ====================================================================
-   § 2. 交差判定ヘルパー（problems.js の _cross と完全一致）
-==================================================================== */
-
-function _cross(ax, ay, bx, by, cx, cy, dx, dy) {
-  if ((ax === cx && ay === cy) || (ax === dx && ay === dy)) return false;
-  if ((bx === cx && by === cy) || (bx === dx && by === dy)) return false;
-  const d1 = (dx - cx) * (ay - cy) - (dy - cy) * (ax - cx);
-  const d2 = (dx - cx) * (by - cy) - (dy - cy) * (bx - cx);
-  const d3 = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
-  const d4 = (bx - ax) * (dy - ay) - (by - ay) * (dx - ax);
-  return (
-    ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
-    ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))
-  );
+/* §2. 交差判定ヘルパー */
+function _cross(ax,ay,bx,by,cx,cy,dx,dy){
+  if((ax===cx&&ay===cy)||(ax===dx&&ay===dy))return false;
+  if((bx===cx&&by===cy)||(bx===dx&&by===dy))return false;
+  const d1=(dx-cx)*(ay-cy)-(dy-cy)*(ax-cx);
+  const d2=(dx-cx)*(by-cy)-(dy-cy)*(bx-cx);
+  const d3=(bx-ax)*(cy-ay)-(by-ay)*(cx-ax);
+  const d4=(bx-ax)*(dy-ay)-(by-ay)*(dx-ax);
+  return(((d1>0&&d2<0)||(d1<0&&d2>0))&&((d3>0&&d4<0)||(d3<0&&d4>0)));
 }
-
-function _countCross(lines) {
-  let n = 0;
-  for (let i = 0; i < lines.length; i++)
-    for (let j = i + 1; j < lines.length; j++)
-      if (_cross(
-        lines[i].x1, lines[i].y1, lines[i].x2, lines[i].y2,
-        lines[j].x1, lines[j].y1, lines[j].x2, lines[j].y2
-      )) n++;
+function _countCross(lines){
+  let n=0;
+  for(let i=0;i<lines.length;i++)
+    for(let j=i+1;j<lines.length;j++)
+      if(_cross(lines[i].x1,lines[i].y1,lines[i].x2,lines[i].y2,
+                lines[j].x1,lines[j].y1,lines[j].x2,lines[j].y2))n++;
   return n;
 }
-
-function _isCollinearOverlap(a, b) {
-  const dxA = a.x2 - a.x1, dyA = a.y2 - a.y1;
-  const cross1 = dxA * (b.y1 - a.y1) - dyA * (b.x1 - a.x1);
-  const cross2 = dxA * (b.y2 - a.y1) - dyA * (b.x2 - a.x1);
-  if (cross1 !== 0 || cross2 !== 0) return false;
-  const len2 = dxA * dxA + dyA * dyA;
-  if (len2 === 0) return false;
-  const t1 = (dxA * (b.x1 - a.x1) + dyA * (b.y1 - a.y1)) / len2;
-  const t2 = (dxA * (b.x2 - a.x1) + dyA * (b.y2 - a.y1)) / len2;
-  return Math.max(t1, t2) > 0 && Math.min(t1, t2) < 1;
+function _isCollinearOverlap(a,b){
+  const dxA=a.x2-a.x1,dyA=a.y2-a.y1;
+  const c1=dxA*(b.y1-a.y1)-dyA*(b.x1-a.x1);
+  const c2=dxA*(b.y2-a.y1)-dyA*(b.x2-a.x1);
+  if(c1!==0||c2!==0)return false;
+  const len2=dxA*dxA+dyA*dyA;
+  if(len2===0)return false;
+  const t1=(dxA*(b.x1-a.x1)+dyA*(b.y1-a.y1))/len2;
+  const t2=(dxA*(b.x2-a.x1)+dyA*(b.y2-a.y1))/len2;
+  return Math.max(t1,t2)>0&&Math.min(t1,t2)<1;
 }
-
-function _hasCollinearOverlap(lines) {
-  for (let i = 0; i < lines.length; i++)
-    for (let j = i + 1; j < lines.length; j++)
-      if (_isCollinearOverlap(lines[i], lines[j])) return true;
+function _hasCollinearOverlap(lines){
+  for(let i=0;i<lines.length;i++)
+    for(let j=i+1;j<lines.length;j++)
+      if(_isCollinearOverlap(lines[i],lines[j]))return true;
   return false;
 }
 
-/* ====================================================================
-   § 3. バリデーション
-==================================================================== */
-
-function _validate(problem, cfg) {
-  const n = _countCross(problem.lines);
-  return n >= cfg.lo && n <= cfg.hi;
+/* §3. バリデーション */
+function _validate(problem,cfg){
+  return _countCross(problem.lines)>=cfg.lo&&_countCross(problem.lines)<=cfg.hi;
 }
 
-/* ====================================================================
-   § 4. 正規化
-==================================================================== */
-
-function _normalise(raw, level) {
-  const cfg   = LEVEL_CFG[level] ?? LEVEL_CFG[1];
-  const maxC  = cfg.gridN;
-  const clamp = v => Math.max(0, Math.min(maxC, Math.round(Number(v) || 0)));
-
-  let lines = (raw.lines || [])
-    .map(l => ({
-      x1: clamp(l.x1 ?? l.x ?? 0),
-      y1: clamp(l.y1 ?? l.y ?? 0),
-      x2: clamp(l.x2 ?? (l.x !== undefined ? l.x + 1 : 1)),
-      y2: clamp(l.y2 ?? (l.y !== undefined ? l.y + 1 : 1))
+/* §4. 正規化 */
+function _normalise(raw,level){
+  const cfg=LEVEL_CFG[level]??LEVEL_CFG[1];
+  const maxC=cfg.gridN;
+  const clamp=v=>Math.max(0,Math.min(maxC,Math.round(Number(v)||0)));
+  let lines=(raw.lines||[])
+    .map(l=>({
+      x1:clamp(l.x1??l.x??0),y1:clamp(l.y1??l.y??0),
+      x2:clamp(l.x2??(l.x!==undefined?l.x+1:1)),
+      y2:clamp(l.y2??(l.y!==undefined?l.y+1:1))
     }))
-    .filter(l => !(l.x1 === l.x2 && l.y1 === l.y2));
-
-  const seen = new Set();
-  lines = lines.filter(l => {
-    const key = (l.x1 < l.x2 || (l.x1 === l.x2 && l.y1 <= l.y2))
-      ? `${l.x1},${l.y1},${l.x2},${l.y2}`
-      : `${l.x2},${l.y2},${l.x1},${l.y1}`;
-    if (seen.has(key)) {
-      console.warn(`[gemini] 端点重複除去: (${l.x1},${l.y1})-(${l.x2},${l.y2})`);
-      return false;
-    }
-    seen.add(key);
-    return true;
+    .filter(l=>!(l.x1===l.x2&&l.y1===l.y2));
+  const seen=new Set();
+  lines=lines.filter(l=>{
+    const key=(l.x1<l.x2||(l.x1===l.x2&&l.y1<=l.y2))
+      ?`${l.x1},${l.y1},${l.x2},${l.y2}`:`${l.x2},${l.y2},${l.x1},${l.y1}`;
+    if(seen.has(key)){console.warn(`[gemini] 重複除去`);return false;}
+    seen.add(key);return true;
   });
+  if(_hasCollinearOverlap(lines)){console.warn('[gemini] コリニア重複→棄却');return null;}
+  if(lines.length!==cfg.lines)return null;
+  return{level,grid:{cols:cfg.gridN+1,rows:cfg.gridN+1},lines,hintLines:lines.slice(0,cfg.hints)};
+}
 
-  if (_hasCollinearOverlap(lines)) {
-    console.warn('[gemini] コリニア重複検出 → 棄却');
-    return null;
+/* §5. JSONパーサー */
+function _extractJsonArray(text){
+  if(!text)return null;
+  const s=text.replace(/```(?:json)?\s*([\s\S]*?)```/g,'$1').trim();
+  for(const c of _extractAllArrayStrings(s).sort((a,b)=>b.length-a.length)){
+    try{const p=JSON.parse(c);if(Array.isArray(p)&&p.length>0&&p.every(i=>i&&typeof i==='object'))return p;}catch(_){}
   }
-  if (lines.length !== cfg.lines) return null;
-
-  return {
-    level,
-    grid: { cols: cfg.gridN + 1, rows: cfg.gridN + 1 },
-    lines,
-    hintLines: lines.slice(0, cfg.hints)
-  };
-}
-
-/* ====================================================================
-   § 5. テキスト抽出パーサー
-==================================================================== */
-
-function _extractJsonArray(text) {
-  if (!text) return null;
-  const stripped = text.replace(/```(?:json)?\s*([\s\S]*?)```/g, '$1').trim();
-
-  for (const candidate of _extractAllArrayStrings(stripped).sort((a,b)=>b.length-a.length)) {
-    try {
-      const p = JSON.parse(candidate);
-      if (Array.isArray(p) && p.length > 0 && p.every(i => i && typeof i === 'object'))
-        return p;
-    } catch(_) {}
+  for(const c of _extractAllObjectStrings(s).sort((a,b)=>b.length-a.length)){
+    try{const p=JSON.parse(c);if(p&&typeof p==='object'&&!Array.isArray(p)){
+      for(const v of Object.values(p))if(Array.isArray(v)&&v.length>0&&v.every(i=>i&&typeof i==='object'))return v;
+    }}catch(_){}
   }
+  const objs=[];
+  for(const line of s.split('\n')){const t=line.trim();if(t.startsWith('{')&&t.endsWith('}')){try{const o=JSON.parse(t);if(o&&'lines'in o)objs.push(o);}catch(_){}}}
+  return objs.length>0?objs:null;
+}
+function _extractAllArrayStrings(text){const r=[];let d=0,s=-1;for(let i=0;i<text.length;i++){if(text[i]==='['){if(!d)s=i;d++;}else if(text[i]===']'){d--;if(!d&&s!==-1){r.push(text.slice(s,i+1));s=-1;}}}return r;}
+function _extractAllObjectStrings(text){const r=[];let d=0,s=-1;for(let i=0;i<text.length;i++){if(text[i]==='{'){if(!d)s=i;d++;}else if(text[i]==='}'){d--;if(!d&&s!==-1){r.push(text.slice(s,i+1));s=-1;}}}return r;}
 
-  for (const candidate of _extractAllObjectStrings(stripped).sort((a,b)=>b.length-a.length)) {
-    try {
-      const p = JSON.parse(candidate);
-      if (p && typeof p === 'object' && !Array.isArray(p)) {
-        for (const val of Object.values(p)) {
-          if (Array.isArray(val) && val.length > 0 && val.every(i => i && typeof i === 'object')) {
-            console.log('[gemini] パターンA: ラッパーをアンラップ');
-            return val;
-          }
-        }
-      }
-    } catch(_) {}
-  }
-
-  const objs = [];
-  for (const line of stripped.split('\n')) {
-    const t = line.trim();
-    if (t.startsWith('{') && t.endsWith('}')) {
-      try {
-        const o = JSON.parse(t);
-        if (o && 'lines' in o) objs.push(o);
-      } catch(_) {}
-    }
-  }
-  if (objs.length > 0) { console.log(`[gemini] パターンB: ${objs.length}件`); return objs; }
-
-  console.warn('[gemini] JSON配列を抽出できませんでした');
-  return null;
+/* §6. no-mime キャッシュ */
+function _isNoMimeCached(model){
+  try{const raw=localStorage.getItem(NO_MIME_CACHE_KEY);if(!raw)return false;
+    const cache=JSON.parse(raw);const e=cache[model];if(!e)return false;
+    if(Date.now()-e.ts>=NO_MIME_CACHE_TTL){delete cache[model];localStorage.setItem(NO_MIME_CACHE_KEY,JSON.stringify(cache));return false;}
+    return true;}catch(_){return false;}
+}
+function _setNoMimeCache(model){
+  try{const raw=localStorage.getItem(NO_MIME_CACHE_KEY);const cache=raw?JSON.parse(raw):{};cache[model]={ts:Date.now()};localStorage.setItem(NO_MIME_CACHE_KEY,JSON.stringify(cache));}catch(_){}
 }
 
-function _extractAllArrayStrings(text) {
-  const r = []; let d = 0, s = -1;
-  for (let i = 0; i < text.length; i++) {
-    if (text[i]==='[') { if(!d) s=i; d++; }
-    else if (text[i]===']') { d--; if(!d&&s!==-1){r.push(text.slice(s,i+1));s=-1;} }
-  }
-  return r;
-}
+/* §7. モデルキャッシュ・ライブ取得・チェーン構築 */
+function _saveModel(model){try{localStorage.setItem(MODEL_CACHE_KEY,JSON.stringify({model,ts:Date.now()}));}catch(_){}}
+function clearModelCache(){try{localStorage.removeItem(MODEL_CACHE_KEY);localStorage.removeItem(LIVE_MODELS_CACHE_KEY);}catch(_){}}
+function saveAdminChain(chain){try{localStorage.setItem(ADMIN_CHAIN_KEY,JSON.stringify({chain,ts:Date.now()}));console.log(`[gemini] 管理者チェーン保存: ${chain.join(' → ')}`);}catch(_){}}
+function loadAdminChain(){try{const raw=localStorage.getItem(ADMIN_CHAIN_KEY);if(!raw)return null;const{chain}=JSON.parse(raw);return Array.isArray(chain)&&chain.length>0?chain:null;}catch(_){return null;}}
+function clearAdminChain(){try{localStorage.removeItem(ADMIN_CHAIN_KEY);}catch(_){}}
 
-function _extractAllObjectStrings(text) {
-  const r = []; let d = 0, s = -1;
-  for (let i = 0; i < text.length; i++) {
-    if (text[i]==='{') { if(!d) s=i; d++; }
-    else if (text[i]==='}') { d--; if(!d&&s!==-1){r.push(text.slice(s,i+1));s=-1;} }
-  }
-  return r;
-}
-
-/* ====================================================================
-   § 6. no-mime キャッシュ管理
-==================================================================== */
-
-function _isNoMimeCached(model) {
-  try {
-    const raw = localStorage.getItem(NO_MIME_CACHE_KEY);
-    if (!raw) return false;
-    const cache = JSON.parse(raw);
-    const entry = cache[model];
-    if (!entry) return false;
-    if ((Date.now() - entry.ts) >= NO_MIME_CACHE_TTL) {
-      delete cache[model];
-      localStorage.setItem(NO_MIME_CACHE_KEY, JSON.stringify(cache));
-      return false;
-    }
-    return true;
-  } catch(_) { return false; }
-}
-
-function _setNoMimeCache(model) {
-  try {
-    const raw = localStorage.getItem(NO_MIME_CACHE_KEY);
-    const cache = raw ? JSON.parse(raw) : {};
-    cache[model] = { ts: Date.now() };
-    localStorage.setItem(NO_MIME_CACHE_KEY, JSON.stringify(cache));
-  } catch(_) {}
-}
-
-/* ====================================================================
-   § 7. モデルキャッシュ・ライブ取得・チェーン構築
-==================================================================== */
-
-function _saveModel(model) {
-  try { localStorage.setItem(MODEL_CACHE_KEY, JSON.stringify({model, ts: Date.now()})); } catch(_) {}
-}
-
-function clearModelCache() {
-  try {
-    localStorage.removeItem(MODEL_CACHE_KEY);
-    localStorage.removeItem(LIVE_MODELS_CACHE_KEY);
-  } catch(_) {}
-}
-
-/**
- * 管理者が設定したチェーンを保存する（app.js から呼び出す）。
- * @param {string[]} chain - モデル名の配列（優先順）
- */
-function saveAdminChain(chain) {
-  try {
-    localStorage.setItem(ADMIN_CHAIN_KEY, JSON.stringify({ chain, ts: Date.now() }));
-    console.log(`[gemini] 管理者チェーン保存: ${chain.join(' → ')}`);
-  } catch(_) {}
-}
-
-/**
- * 管理者設定チェーンを読み込む。
- * @returns {string[]|null}
- */
-function loadAdminChain() {
-  try {
-    const raw = localStorage.getItem(ADMIN_CHAIN_KEY);
-    if (!raw) return null;
-    const { chain } = JSON.parse(raw);
-    return Array.isArray(chain) && chain.length > 0 ? chain : null;
-  } catch(_) { return null; }
-}
-
-/**
- * 管理者設定チェーンをクリアする（Redo時に呼び出す）。
- */
-function clearAdminChain() {
-  try { localStorage.removeItem(ADMIN_CHAIN_KEY); } catch(_) {}
-}
-
-/**
- * Gemini /v1beta/models からflash系モデルを取得（pro除外）。
- * 結果を1時間キャッシュする。
- *
- * @param {string} apiKey
- * @returns {Promise<string[]|null>}
- */
-async function _fetchLiveModels(apiKey) {
-  try {
-    const raw = localStorage.getItem(LIVE_MODELS_CACHE_KEY);
-    if (raw) {
-      const { models, ts } = JSON.parse(raw);
-      if (Date.now() - ts < LIVE_MODELS_CACHE_TTL) {
-        console.log(`[gemini] ライブモデルキャッシュ使用: ${models.length}件`);
-        return models;
-      }
-    }
-  } catch(_) {}
-
-  try {
-    const ctrl = new AbortController();
-    const tid  = setTimeout(() => ctrl.abort(), 5000);
-    const resp = await fetch(
-      `${BASE_URL}/models?key=${encodeURIComponent(apiKey)}`,
-      { signal: ctrl.signal }
-    );
+async function _fetchLiveModels(apiKey){
+  try{
+    const raw=localStorage.getItem(LIVE_MODELS_CACHE_KEY);
+    if(raw){const{models,ts}=JSON.parse(raw);if(Date.now()-ts<LIVE_MODELS_CACHE_TTL){console.log(`[gemini] ライブモデルキャッシュ: ${models.length}件`);return models;}}
+  }catch(_){}
+  try{
+    const ctrl=new AbortController();const tid=setTimeout(()=>ctrl.abort(),5000);
+    const resp=await fetch(`${BASE_URL}/models?key=${encodeURIComponent(apiKey)}`,{signal:ctrl.signal});
     clearTimeout(tid);
-    if (!resp.ok) { console.warn(`[gemini] /v1beta/models HTTP ${resp.status}`); return null; }
-
-    const data = await resp.json();
-    const models = (data.models || [])
-      .filter(m => {
-        const name = m.name?.replace(/^models\//, '') || '';
-        // generateContent 対応かつ flash 系かつ pro 除外
-        const supported = (m.supportedGenerationMethods || []).includes('generateContent');
-        const isFlash   = name.includes('flash');
-        const isPro     = EXCLUDED_KEYWORDS.some(kw => name.includes(kw));
-        return supported && isFlash && !isPro;
+    if(!resp.ok){console.warn(`[gemini] /v1beta/models HTTP ${resp.status}`);return null;}
+    const data=await resp.json();
+    const models=(data.models||[])
+      .filter(m=>{
+        const name=m.name?.replace(/^models\//,'')||'';
+        const supported=(m.supportedGenerationMethods||[]).includes('generateContent');
+        const isFlash=name.includes('flash');
+        // 【Fix-H】pro と image を両方除外
+        const isExcluded=EXCLUDED_KEYWORDS.some(kw=>name.includes(kw));
+        return supported&&isFlash&&!isExcluded;
       })
-      .map(m => m.name.replace(/^models\//, ''));
-
-    console.log(`[gemini] ライブflashモデル取得: ${models.length}件`, models);
-    try {
-      localStorage.setItem(LIVE_MODELS_CACHE_KEY, JSON.stringify({ models, ts: Date.now() }));
-    } catch(_) {}
+      .map(m=>m.name.replace(/^models\//,''));
+    console.log(`[gemini] ライブflashモデル取得: ${models.length}件`,models);
+    try{localStorage.setItem(LIVE_MODELS_CACHE_KEY,JSON.stringify({models,ts:Date.now()}));}catch(_){}
     return models;
-
-  } catch(e) {
-    console.warn('[gemini] ライブモデル取得エラー:', e.message);
-    return null;
-  }
+  }catch(e){console.warn('[gemini] ライブモデル取得エラー:',e.message);return null;}
 }
 
-/**
- * 実行チェーンを構築する。
- *
- * 優先順位:
- * 1. 管理者設定チェーン（ADMIN_CHAIN_KEY）が存在し、
- *    ライブモデルに全て含まれる場合はそのまま使用
- * 2. 管理者設定チェーンの一部が廃止されている場合:
- *    - window._geminiStatus.needsAdminRedo = true を立てる
- *    - 生きているモデルのみで継続
- * 3. 管理者設定なし: FALLBACK_MODEL_CHAIN からライブ確認 + 補充
- *
- * @param {string} apiKey
- * @returns {Promise<{chain: string[], needsRedo: boolean, liveModels: string[]|null}>}
- */
-async function _buildEffectiveChain(apiKey) {
-  const liveModels = await _fetchLiveModels(apiKey);
-  const adminChain = loadAdminChain();
-
-  // ライブ取得失敗時は既存設定をそのまま使用
-  if (!liveModels) {
-    const chain = adminChain || FALLBACK_MODEL_CHAIN;
-    console.log('[gemini] ライブ取得不可 → 既存チェーン使用:', chain);
-    return { chain, needsRedo: false, liveModels: null };
+async function _buildEffectiveChain(apiKey){
+  const liveModels=await _fetchLiveModels(apiKey);
+  const adminChain=loadAdminChain();
+  if(!liveModels){const chain=adminChain||FALLBACK_MODEL_CHAIN;return{chain,needsRedo:false,liveModels:null};}
+  if(adminChain){
+    const alive=adminChain.filter(m=>liveModels.includes(m));
+    const dead=adminChain.filter(m=>!liveModels.includes(m));
+    if(dead.length>0){console.warn(`[gemini] 廃止モデル: ${dead.join(', ')}`);return{chain:alive.length>0?alive:FALLBACK_MODEL_CHAIN,needsRedo:true,liveModels};}
+    return{chain:adminChain,needsRedo:false,liveModels};
   }
-
-  // 管理者設定チェーンがある場合
-  if (adminChain) {
-    const alive = adminChain.filter(m => liveModels.includes(m));
-    const dead  = adminChain.filter(m => !liveModels.includes(m));
-
-    if (dead.length > 0) {
-      console.warn(`[gemini] 管理者設定モデルが廃止: ${dead.join(', ')}`);
-      // 廃止モデルがあるため管理者にRedo要求
-      return { chain: alive.length > 0 ? alive : FALLBACK_MODEL_CHAIN, needsRedo: true, liveModels };
-    }
-
-    console.log(`[gemini] 管理者チェーン有効: ${adminChain.join(' → ')}`);
-    return { chain: adminChain, needsRedo: false, liveModels };
-  }
-
-  // 管理者設定なし: FALLBACK_MODEL_CHAINをベースに構築
-  const alive = FALLBACK_MODEL_CHAIN.filter(m => liveModels.includes(m));
-  const dead  = FALLBACK_MODEL_CHAIN.filter(m => !liveModels.includes(m));
-  if (dead.length > 0) console.warn(`[gemini] デフォルトチェーンで廃止モデル検出: ${dead.join(', ')}`);
-
-  // 不足分を補充
-  const inChain = new Set(FALLBACK_MODEL_CHAIN);
-  const supplements = [];
-  for (const kw of PREFERRED_KEYWORDS) {
-    for (const m of liveModels) {
-      if (m.includes(kw) && !inChain.has(m) && !supplements.includes(m)) {
-        supplements.push(m);
-        break;
-      }
-    }
-  }
-
-  const chain = [...alive, ...supplements];
-  console.log(`[gemini] 実行チェーン確定: ${chain.join(' → ')}`);
-  return { chain: chain.length > 0 ? chain : FALLBACK_MODEL_CHAIN, needsRedo: false, liveModels };
+  const alive=FALLBACK_MODEL_CHAIN.filter(m=>liveModels.includes(m));
+  const inChain=new Set(FALLBACK_MODEL_CHAIN);
+  const supplements=[];
+  for(const kw of PREFERRED_KEYWORDS){for(const m of liveModels){if(m.includes(kw)&&!inChain.has(m)&&!supplements.includes(m)){supplements.push(m);break;}}}
+  const chain=[...alive,...supplements];
+  return{chain:chain.length>0?chain:FALLBACK_MODEL_CHAIN,needsRedo:false,liveModels};
 }
 
-/* ====================================================================
-   § 8. （廃止）モデル解決
-==================================================================== */
-
-/* ====================================================================
-   § 9. プロンプト生成
-==================================================================== */
-
-function _buildPrompt(level, count) {
-  const cfg = LEVEL_CFG[level] ?? LEVEL_CFG[1];
-  const { lines: lineCount, gridN, lo, hi } = cfg;
-  return `You are generating line puzzle problems for a visual math game for young children.
+/* §9. プロンプト生成 */
+function _buildPrompt(level,count){
+  const cfg=LEVEL_CFG[level]??LEVEL_CFG[1];
+  const{lines:lineCount,gridN,lo,hi}=cfg;
+  return`You are generating line puzzle problems for a visual math game for young children.
 
 Rules:
-- Each problem has exactly ${lineCount} line segments on a ${gridN + 1}x${gridN + 1} grid.
+- Each problem has exactly ${lineCount} line segments on a ${gridN+1}x${gridN+1} grid.
 - All coordinates are integers in the range [0, ${gridN}] (inclusive).
 - No zero-length lines (x1==x2 AND y1==y2 is forbidden).
 - Each line segment must be VISUALLY DISTINCT. Two segments must NOT overlap in any way:
@@ -466,287 +220,134 @@ Output ONLY a JSON array:
 [{"lines":[{"x1":0,"y1":0,"x2":2,"y2":3},...${lineCount} lines]},... ${count} problems]`;
 }
 
-/* ====================================================================
-   § 10. フォールバック問題バンク
-==================================================================== */
-
-const _FALLBACK = {
-  0: [
-    { lines: [{x1:0,y1:0,x2:3,y2:0},{x1:0,y1:1,x2:3,y2:1},{x1:0,y1:2,x2:3,y2:2}] },
-    { lines: [{x1:0,y1:0,x2:0,y2:3},{x1:1,y1:0,x2:1,y2:3},{x1:2,y1:0,x2:2,y2:3}] },
-    { lines: [{x1:0,y1:0,x2:3,y2:3},{x1:0,y1:3,x2:3,y2:0},{x1:0,y1:1,x2:3,y2:1}] },
-    { lines: [{x1:1,y1:0,x2:1,y2:3},{x1:2,y1:0,x2:2,y2:3},{x1:0,y1:1,x2:3,y2:1}] },
-    { lines: [{x1:0,y1:0,x2:3,y2:0},{x1:0,y1:3,x2:3,y2:3},{x1:1,y1:0,x2:2,y2:3}] }
+/* §10. フォールバック問題バンク */
+const _FALLBACK={
+  0:[
+    {lines:[{x1:0,y1:0,x2:3,y2:0},{x1:0,y1:1,x2:3,y2:1},{x1:0,y1:2,x2:3,y2:2}]},
+    {lines:[{x1:0,y1:0,x2:0,y2:3},{x1:1,y1:0,x2:1,y2:3},{x1:2,y1:0,x2:2,y2:3}]},
+    {lines:[{x1:0,y1:0,x2:3,y2:3},{x1:0,y1:3,x2:3,y2:0},{x1:0,y1:1,x2:3,y2:1}]},
+    {lines:[{x1:1,y1:0,x2:1,y2:3},{x1:2,y1:0,x2:2,y2:3},{x1:0,y1:1,x2:3,y2:1}]},
+    {lines:[{x1:0,y1:0,x2:3,y2:0},{x1:0,y1:3,x2:3,y2:3},{x1:1,y1:0,x2:2,y2:3}]}
   ],
-  1: [
-    { lines: [{x1:0,y1:0,x2:3,y2:0},{x1:0,y1:1,x2:3,y2:1},{x1:0,y1:2,x2:3,y2:2},{x1:0,y1:3,x2:3,y2:3}] },
-    { lines: [{x1:0,y1:0,x2:1,y2:3},{x1:1,y1:0,x2:0,y2:3},{x1:2,y1:0,x2:3,y2:1},{x1:2,y1:2,x2:3,y2:3}] },
-    { lines: [{x1:0,y1:0,x2:1,y2:3},{x1:1,y1:0,x2:0,y2:3},{x1:2,y1:0,x2:3,y2:3},{x1:3,y1:0,x2:2,y2:3}] },
-    { lines: [{x1:0,y1:0,x2:3,y2:2},{x1:0,y1:2,x2:3,y2:0},{x1:1,y1:0,x2:0,y2:3},{x1:3,y1:2,x2:3,y2:3}] },
-    { lines: [{x1:0,y1:1,x2:3,y2:2},{x1:0,y1:2,x2:3,y2:1},{x1:0,y1:0,x2:3,y2:3},{x1:2,y1:0,x2:3,y2:0}] }
+  1:[
+    {lines:[{x1:0,y1:0,x2:3,y2:0},{x1:0,y1:1,x2:3,y2:1},{x1:0,y1:2,x2:3,y2:2},{x1:0,y1:3,x2:3,y2:3}]},
+    {lines:[{x1:0,y1:0,x2:1,y2:3},{x1:1,y1:0,x2:0,y2:3},{x1:2,y1:0,x2:3,y2:1},{x1:2,y1:2,x2:3,y2:3}]},
+    {lines:[{x1:0,y1:0,x2:1,y2:3},{x1:1,y1:0,x2:0,y2:3},{x1:2,y1:0,x2:3,y2:3},{x1:3,y1:0,x2:2,y2:3}]},
+    {lines:[{x1:0,y1:0,x2:3,y2:2},{x1:0,y1:2,x2:3,y2:0},{x1:1,y1:0,x2:0,y2:3},{x1:3,y1:2,x2:3,y2:3}]},
+    {lines:[{x1:0,y1:1,x2:3,y2:2},{x1:0,y1:2,x2:3,y2:1},{x1:0,y1:0,x2:3,y2:3},{x1:2,y1:0,x2:3,y2:0}]}
   ],
-  2: [
-    { lines: [{x1:0,y1:0,x2:1,y2:3},{x1:1,y1:0,x2:0,y2:3},{x1:2,y1:0,x2:3,y2:3},{x1:3,y1:0,x2:2,y2:3}] },
-    { lines: [{x1:0,y1:0,x2:3,y2:2},{x1:0,y1:2,x2:3,y2:0},{x1:1,y1:0,x2:2,y2:3},{x1:0,y1:3,x2:1,y2:3}] },
-    { lines: [{x1:0,y1:0,x2:2,y2:3},{x1:2,y1:0,x2:0,y2:3},{x1:1,y1:1,x2:3,y2:3},{x1:3,y1:0,x2:1,y2:2}] },
-    { lines: [{x1:0,y1:0,x2:3,y2:3},{x1:0,y1:3,x2:3,y2:0},{x1:0,y1:1,x2:3,y2:2},{x1:0,y1:2,x2:3,y2:1}] },
-    { lines: [{x1:0,y1:0,x2:3,y2:2},{x1:0,y1:2,x2:3,y2:0},{x1:0,y1:3,x2:3,y2:1},{x1:0,y1:1,x2:3,y2:3}] }
+  2:[
+    {lines:[{x1:0,y1:0,x2:1,y2:3},{x1:1,y1:0,x2:0,y2:3},{x1:2,y1:0,x2:3,y2:3},{x1:3,y1:0,x2:2,y2:3}]},
+    {lines:[{x1:0,y1:0,x2:3,y2:2},{x1:0,y1:2,x2:3,y2:0},{x1:1,y1:0,x2:2,y2:3},{x1:0,y1:3,x2:1,y2:3}]},
+    {lines:[{x1:0,y1:0,x2:2,y2:3},{x1:2,y1:0,x2:0,y2:3},{x1:1,y1:1,x2:3,y2:3},{x1:3,y1:0,x2:1,y2:2}]},
+    {lines:[{x1:0,y1:0,x2:3,y2:3},{x1:0,y1:3,x2:3,y2:0},{x1:0,y1:1,x2:3,y2:2},{x1:0,y1:2,x2:3,y2:1}]},
+    {lines:[{x1:0,y1:0,x2:3,y2:2},{x1:0,y1:2,x2:3,y2:0},{x1:0,y1:3,x2:3,y2:1},{x1:0,y1:1,x2:3,y2:3}]}
   ],
-  3: [
-    { lines: [{x1:0,y1:0,x2:4,y2:4},{x1:0,y1:4,x2:4,y2:0},{x1:0,y1:2,x2:4,y2:2},{x1:2,y1:0,x2:2,y2:4},{x1:0,y1:1,x2:4,y2:3}] },
-    { lines: [{x1:0,y1:0,x2:4,y2:3},{x1:0,y1:3,x2:4,y2:0},{x1:1,y1:0,x2:3,y2:4},{x1:3,y1:0,x2:1,y2:4},{x1:0,y1:4,x2:4,y2:4}] },
-    { lines: [{x1:0,y1:0,x2:4,y2:4},{x1:0,y1:4,x2:4,y2:0},{x1:0,y1:1,x2:4,y2:1},{x1:0,y1:3,x2:4,y2:3},{x1:2,y1:0,x2:2,y2:4}] },
-    { lines: [{x1:0,y1:0,x2:3,y2:4},{x1:1,y1:0,x2:4,y2:4},{x1:0,y1:4,x2:3,y2:0},{x1:1,y1:4,x2:4,y2:0},{x1:0,y1:2,x2:4,y2:2}] },
-    { lines: [{x1:0,y1:1,x2:4,y2:3},{x1:0,y1:3,x2:4,y2:1},{x1:1,y1:0,x2:3,y2:4},{x1:3,y1:0,x2:1,y2:4},{x1:0,y1:0,x2:4,y2:4}] }
+  3:[
+    {lines:[{x1:0,y1:0,x2:4,y2:4},{x1:0,y1:4,x2:4,y2:0},{x1:0,y1:2,x2:4,y2:2},{x1:2,y1:0,x2:2,y2:4},{x1:0,y1:1,x2:4,y2:3}]},
+    {lines:[{x1:0,y1:0,x2:4,y2:3},{x1:0,y1:3,x2:4,y2:0},{x1:1,y1:0,x2:3,y2:4},{x1:3,y1:0,x2:1,y2:4},{x1:0,y1:4,x2:4,y2:4}]},
+    {lines:[{x1:0,y1:0,x2:4,y2:4},{x1:0,y1:4,x2:4,y2:0},{x1:0,y1:1,x2:4,y2:1},{x1:0,y1:3,x2:4,y2:3},{x1:2,y1:0,x2:2,y2:4}]},
+    {lines:[{x1:0,y1:0,x2:3,y2:4},{x1:1,y1:0,x2:4,y2:4},{x1:0,y1:4,x2:3,y2:0},{x1:1,y1:4,x2:4,y2:0},{x1:0,y1:2,x2:4,y2:2}]},
+    {lines:[{x1:0,y1:1,x2:4,y2:3},{x1:0,y1:3,x2:4,y2:1},{x1:1,y1:0,x2:3,y2:4},{x1:3,y1:0,x2:1,y2:4},{x1:0,y1:0,x2:4,y2:4}]}
   ]
 };
-
-function _getFallback(level, count) {
-  const pool = (
-    typeof PROBLEM_BANK !== 'undefined' && PROBLEM_BANK[level]
-      ? PROBLEM_BANK[level] : _FALLBACK[level] || _FALLBACK[1]
-  ).slice();
-  for (let i = pool.length-1; i>0; i--) {
-    const j = Math.floor(Math.random()*(i+1));
-    [pool[i],pool[j]] = [pool[j],pool[i]];
-  }
-  const cfg = LEVEL_CFG[level] ?? LEVEL_CFG[1];
-  return pool.slice(0, count).map(p => ({
-    level,
-    grid: p.grid ?? { cols: cfg.gridN+1, rows: cfg.gridN+1 },
-    lines: p.lines,
-    hintLines: p.hintLines || p.lines.slice(0, cfg.hints)
-  }));
+function _getFallback(level,count){
+  const pool=(typeof PROBLEM_BANK!=='undefined'&&PROBLEM_BANK[level]?PROBLEM_BANK[level]:_FALLBACK[level]||_FALLBACK[1]).slice();
+  for(let i=pool.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[pool[i],pool[j]]=[pool[j],pool[i]];}
+  const cfg=LEVEL_CFG[level]??LEVEL_CFG[1];
+  return pool.slice(0,count).map(p=>({level,grid:p.grid??{cols:cfg.gridN+1,rows:cfg.gridN+1},lines:p.lines,hintLines:p.hintLines||p.lines.slice(0,cfg.hints)}));
 }
 
-/* ====================================================================
-   § 11. API 送信コア
-==================================================================== */
-
-async function _callApi(model, apiKey, prompt, forcePlain = false) {
-  const generationConfig = { temperature: 0.7, maxOutputTokens: 2048 };
-  const useJsonMode = !forcePlain && !_isNoMimeCached(model);
-  if (useJsonMode) generationConfig.responseMimeType = 'application/json';
-
-  console.log(`[gemini] _callApi: ${model} / ${useJsonMode ? 'JSON' : 'TEXT'}モード`);
-
-  const ctrl = new AbortController();
-  const tid  = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
-
+/* §11. API送信コア */
+async function _callApi(model,apiKey,prompt,forcePlain=false){
+  const generationConfig={temperature:0.7,maxOutputTokens:2048};
+  const useJsonMode=!forcePlain&&!_isNoMimeCached(model);
+  if(useJsonMode)generationConfig.responseMimeType='application/json';
+  console.log(`[gemini] _callApi: ${model} / ${useJsonMode?'JSON':'TEXT'}モード`);
+  const ctrl=new AbortController();const tid=setTimeout(()=>ctrl.abort(),FETCH_TIMEOUT_MS);
   let resp;
-  try {
-    resp = await fetch(
-      `${BASE_URL}/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        signal: ctrl.signal,
-        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig })
-      }
-    );
+  try{
+    resp=await fetch(`${BASE_URL}/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`,
+      {method:'POST',headers:{'Content-Type':'application/json'},signal:ctrl.signal,
+       body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig})});
     clearTimeout(tid);
-  } catch(e) {
-    clearTimeout(tid);
-    const isTimeout = e.name === 'AbortError';
-    console.warn(`[gemini] fetch ${isTimeout ? 'タイムアウト' : 'ネットワークエラー'}: ${model}`);
-    return { raw: null, status: isTimeout ? 408 : 0 };
-  }
-
-  if (resp.status === 400 && useJsonMode) {
-    _setNoMimeCache(model);
-    return _callApi(model, apiKey, prompt, true);
-  }
-  if (resp.status === 404 || resp.status === 410) {
-    console.warn(`[gemini] HTTP ${resp.status}: ${model} 廃止の可能性`);
-    return { raw: null, status: resp.status };
-  }
-  if (!resp.ok) {
-    console.warn(`[gemini] HTTP ${resp.status}: ${model}`);
-    return { raw: null, status: resp.status };
-  }
-
-  let data;
-  try { data = await resp.json(); }
-  catch(e) { return { raw: null, status: 200 }; }
-
-  const part    = data?.candidates?.[0]?.content?.parts?.[0];
-  const rawText = part?.text;
-  const text    = (typeof rawText === 'string' && rawText.trim().length > 0)
-    ? rawText.trim() : null;
-
-  console.log('[gemini] part keys:', part ? Object.keys(part) : 'no part');
-  console.log('[gemini] text length:', text !== null ? text.length : 'null');
-
-  let problems = null;
-  if (useJsonMode) {
-    if (text !== null) {
-      try {
-        const parsed = JSON.parse(text);
-        problems = Array.isArray(parsed) && parsed.length > 0
-          ? parsed : _extractJsonArray(text);
-      } catch(e) { problems = _extractJsonArray(text); }
-    } else {
-      problems = _extractJsonArray(JSON.stringify(data));
-      if (!problems || problems.length === 0) {
-        _setNoMimeCache(model);
-        return _callApi(model, apiKey, prompt, true);
-      }
-    }
-  } else {
-    problems = text !== null
-      ? _extractJsonArray(text)
-      : _extractJsonArray(JSON.stringify(data));
-  }
-
-  return { raw: problems, status: resp.status };
+  }catch(e){clearTimeout(tid);const isTimeout=e.name==='AbortError';console.warn(`[gemini] ${isTimeout?'タイムアウト':'ネットワークエラー'}: ${model}`);return{raw:null,status:isTimeout?408:0};}
+  if(resp.status===400&&useJsonMode){_setNoMimeCache(model);return _callApi(model,apiKey,prompt,true);}
+  if(resp.status===404||resp.status===410){console.warn(`[gemini] HTTP ${resp.status}: ${model} 廃止の可能性`);return{raw:null,status:resp.status};}
+  if(!resp.ok){console.warn(`[gemini] HTTP ${resp.status}: ${model}`);return{raw:null,status:resp.status};}
+  let data;try{data=await resp.json();}catch(e){return{raw:null,status:200};}
+  const part=data?.candidates?.[0]?.content?.parts?.[0];
+  const rawText=part?.text;
+  const text=(typeof rawText==='string'&&rawText.trim().length>0)?rawText.trim():null;
+  console.log('[gemini] part keys:',part?Object.keys(part):'no part');
+  console.log('[gemini] text length:',text!==null?text.length:'null');
+  let problems=null;
+  if(useJsonMode){
+    if(text!==null){try{const p=JSON.parse(text);problems=Array.isArray(p)&&p.length>0?p:_extractJsonArray(text);}catch(e){problems=_extractJsonArray(text);}}
+    else{problems=_extractJsonArray(JSON.stringify(data));if(!problems||problems.length===0){_setNoMimeCache(model);return _callApi(model,apiKey,prompt,true);}}
+  }else{problems=text!==null?_extractJsonArray(text):_extractJsonArray(JSON.stringify(data));}
+  return{raw:problems,status:resp.status};
 }
 
-/* ====================================================================
-   § 12. レスポンス検証・正規化
-==================================================================== */
-
-function _processRaw(raw, level, need) {
-  if (!Array.isArray(raw) || raw.length === 0) return [];
-  const cfg = LEVEL_CFG[level] ?? LEVEL_CFG[1];
-  const valid = [];
-  for (const item of raw) {
-    if (!item || typeof item !== 'object') continue;
-    const problem = _normalise(item, level);
-    if (!problem) continue;
-    if (!_validate(problem, cfg)) { console.warn('[gemini] 交差数制約違反 → 棄却'); continue; }
-    valid.push(problem);
-    if (valid.length >= need) break;
+/* §12. レスポンス検証・正規化 */
+function _processRaw(raw,level,need){
+  if(!Array.isArray(raw)||raw.length===0)return[];
+  const cfg=LEVEL_CFG[level]??LEVEL_CFG[1];
+  const valid=[];
+  for(const item of raw){
+    if(!item||typeof item!=='object')continue;
+    const problem=_normalise(item,level);if(!problem)continue;
+    if(!_validate(problem,cfg)){console.warn('[gemini] 交差数制約違反→棄却');continue;}
+    valid.push(problem);if(valid.length>=need)break;
   }
   return valid;
 }
 
-/* ====================================================================
-   § 13. メイン API: generateProblems
-==================================================================== */
-
-/**
- * 連続エラーカウンターとステータスを window._geminiStatus に公開する。
- *
- * window._geminiStatus の構造:
- * {
- *   errorCount    : number,   // 今セッションの累計エラー回数
- *   needsAdminRedo: boolean,  // 廃止モデル検出 → 管理者設定Redo要求
- *   lastError     : string,   // 最後のエラー内容
- *   currentChain  : string[], // 現在の実行チェーン
- *   liveModels    : string[], // 取得できたライブモデル一覧
- * }
- */
-function _updateStatus(patch) {
-  try {
-    if (!window._geminiStatus) window._geminiStatus = { errorCount: 0, needsAdminRedo: false };
-    Object.assign(window._geminiStatus, patch);
-    // app.js がポーリングまたはカスタムイベントで検知できるよう通知
-    window.dispatchEvent(new CustomEvent('geminiStatusUpdate', { detail: window._geminiStatus }));
-  } catch(_) {}
+/* §13. メインAPI: generateProblems */
+function _updateStatus(patch){
+  try{
+    if(!window._geminiStatus)window._geminiStatus={errorCount:0,needsAdminRedo:false};
+    Object.assign(window._geminiStatus,patch);
+    window.dispatchEvent(new CustomEvent('geminiStatusUpdate',{detail:window._geminiStatus}));
+  }catch(_){}
 }
 
-async function generateProblems(level, count = 5, apiKey) {
-  if (!apiKey) {
-    console.log('[gemini] APIキーなし → フォールバック');
-    return _getFallback(level, count);
-  }
-
-  const { chain, needsRedo, liveModels } = await _buildEffectiveChain(apiKey);
-
-  _updateStatus({ currentChain: chain, liveModels: liveModels || [] });
-
-  if (needsRedo) {
-    _updateStatus({ needsAdminRedo: true, lastError: '設定済みモデルが廃止されました。モデル設定を更新してください。' });
-  }
-
-  if (chain.length === 0) {
-    const msg = 'AIモデルが全て利用不可です。管理者設定でモデルを更新してください。';
-    _updateStatus({ needsAdminRedo: true, lastError: msg });
-    console.error(`[gemini] ${msg}`);
-    return _getFallback(level, count);
-  }
-
-  const prompt = _buildPrompt(level, count);
-  let sessionErrors = 0;
-
-  for (const model of chain) {
-    let attempts = 0, count429 = 0;
+async function generateProblems(level,count=5,apiKey){
+  if(!apiKey){console.log('[gemini] APIキーなし→フォールバック');return _getFallback(level,count);}
+  const{chain,needsRedo,liveModels}=await _buildEffectiveChain(apiKey);
+  _updateStatus({currentChain:chain,liveModels:liveModels||[]});
+  if(needsRedo)_updateStatus({needsAdminRedo:true,lastError:'設定済みモデルが廃止されました。モデル設定を更新してください。'});
+  if(chain.length===0){const msg='AIモデルが全て利用不可です。管理者設定でモデルを更新してください。';_updateStatus({needsAdminRedo:true,lastError:msg});return _getFallback(level,count);}
+  const prompt=_buildPrompt(level,count);
+  let sessionErrors=0;
+  for(const model of chain){
+    let attempts=0,count429=0;
     console.log(`[gemini] モデル試行: ${model}`);
-
-    while (attempts < MAX_ATTEMPTS_PER_MODEL) {
+    while(attempts<MAX_ATTEMPTS_PER_MODEL){
       attempts++;
-      const { raw, status } = await _callApi(model, apiKey, prompt);
-
-      if (status === 401 || status === 403) {
-        console.error('[gemini] 認証エラー');
-        _updateStatus({ lastError: 'APIキーが無効です。APIキーを確認してください。' });
-        return _getFallback(level, count);
-      }
-      if (status === 408 || status === 0) {
-        sessionErrors++;
-        _updateStatus({ errorCount: (window._geminiStatus?.errorCount||0) + 1,
-          lastError: `タイムアウト (${model})` });
-        break;
-      }
-      if (status === 404 || status === 410) {
-        sessionErrors++;
-        _updateStatus({ errorCount: (window._geminiStatus?.errorCount||0) + 1,
-          needsAdminRedo: true,
-          lastError: `モデル廃止検出 (${model})。管理者設定でモデルを更新してください。` });
-        break;
-      }
-      if (status === 429) {
-        count429++;
-        sessionErrors++;
-        _updateStatus({ errorCount: (window._geminiStatus?.errorCount||0) + 1,
-          lastError: `レート制限 (${model})` });
-        if (count429 >= MAX_429_PER_MODEL) break;
-        await new Promise(r => setTimeout(r, 1000 * Math.pow(2, count429-1)));
-        continue;
-      }
-
-      const valid = _processRaw(raw, level, count);
-      if (valid.length >= count) {
-        _saveModel(model);
-        console.log(`[gemini] ${model} 成功: ${valid.length}件`);
-        return valid.slice(0, count);
-      }
-
-      sessionErrors++;
-      _updateStatus({ errorCount: (window._geminiStatus?.errorCount||0) + 1,
-        lastError: `有効問題不足 (${model}: ${valid.length}/${count})` });
+      const{raw,status}=await _callApi(model,apiKey,prompt);
+      if(status===401||status===403){console.error('[gemini] 認証エラー');_updateStatus({lastError:'APIキーが無効です。APIキーを確認してください。'});return _getFallback(level,count);}
+      if(status===408||status===0){sessionErrors++;_updateStatus({errorCount:(window._geminiStatus?.errorCount||0)+1,lastError:`タイムアウト (${model})`});break;}
+      if(status===404||status===410){sessionErrors++;_updateStatus({errorCount:(window._geminiStatus?.errorCount||0)+1,needsAdminRedo:true,lastError:`モデル廃止検出 (${model})。管理者設定でモデルを更新してください。`});break;}
+      if(status===429){count429++;sessionErrors++;_updateStatus({errorCount:(window._geminiStatus?.errorCount||0)+1,lastError:`レート制限 (${model})`});if(count429>=MAX_429_PER_MODEL)break;await new Promise(r=>setTimeout(r,1000*Math.pow(2,count429-1)));continue;}
+      const valid=_processRaw(raw,level,count);
+      if(valid.length>=count){_saveModel(model);console.log(`[gemini] ${model} 成功: ${valid.length}件`);return valid.slice(0,count);}
+      sessionErrors++;_updateStatus({errorCount:(window._geminiStatus?.errorCount||0)+1,lastError:`有効問題不足 (${model}: ${valid.length}/${count})`});
     }
-
-    // エラー累計が閾値を超えたら通知フラグを立てる（app.js がダイアログ表示）
-    if (sessionErrors >= ERROR_NOTIFY_THRESHOLD) {
-      _updateStatus({ needsAdminRedo: true,
-        lastError: `エラーが${sessionErrors}回発生しました。モデル設定の確認を推奨します。` });
-    }
+    if(sessionErrors>=ERROR_NOTIFY_THRESHOLD)_updateStatus({needsAdminRedo:true,lastError:`エラーが${sessionErrors}回発生しました。モデル設定の確認を推奨します。`});
   }
-
-  console.warn('[gemini] 全モデル失敗 → フォールバック');
-  return _getFallback(level, count);
+  console.warn('[gemini] 全モデル失敗→フォールバック');return _getFallback(level,count);
 }
 
-/* ====================================================================
-   § 14. API キー管理
-==================================================================== */
+/* §14. APIキー管理 */
+const API_KEY_STORAGE='gemini_api_key';
+function saveApiKey(key){try{localStorage.setItem(API_KEY_STORAGE,key);}catch(_){}}
+function loadApiKey(){try{return localStorage.getItem(API_KEY_STORAGE)||'';}catch(_){return '';}}
 
-const API_KEY_STORAGE = 'gemini_api_key';
-function saveApiKey(key) { try { localStorage.setItem(API_KEY_STORAGE, key); } catch(_) {} }
-function loadApiKey()    { try { return localStorage.getItem(API_KEY_STORAGE)||''; } catch(_) { return ''; } }
-
-/* ====================================================================
-   § 15. エクスポート
-==================================================================== */
-
-return {
-  generateProblems,
-  saveApiKey, loadApiKey, clearModelCache,
-  saveAdminChain, loadAdminChain, clearAdminChain,
-  fetchLiveModels: _fetchLiveModels   // 管理者UI から呼び出し可能に公開
-};
-
+/* §15. エクスポート */
+return{generateProblems,saveApiKey,loadApiKey,clearModelCache,
+       saveAdminChain,loadAdminChain,clearAdminChain,
+       fetchLiveModels:_fetchLiveModels};
 })();
 
 const generateProblems = _G.generateProblems;
