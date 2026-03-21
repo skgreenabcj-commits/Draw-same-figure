@@ -1,19 +1,31 @@
 'use strict';
 
 /* =====================================================================
-   gemini.js  v5.7
+   gemini.js  v5.8
    -----------------------------------------------------------------------
-   v5.7 からの変更点（v5.6 → v5.7）:
-     【Fix-H】_fetchLiveModels に image 系モデル除外を追加
-       - EXCLUDED_KEYWORDS = ['pro', 'image'] に変更
-       - admin.html 側のプルダウン連携に対応（FALLBACK_CHAIN 書き換えは
-         saveAdminChain / loadAdminChain で既に対応済み）
-   =====================================================================
-*/
+   v5.8 からの変更点（v5.7 → v5.8）:
+     【Fix-I】_updateStatus に localStorage 永続化を追加
+       - _updateStatus 呼び出しのたびに 'gemini_admin_status_v1' へ
+         マージ書き込みを行う
+       - admin.html（別ページ）が localStorage を読むことで
+         ゲーム画面でのAI生成ログ・エラー情報を確実に参照できる
+       - 成功モデルを lastSuccessModel として同キーに記録する
+         （_saveModel と連動）
+
+   v5.7 以前の変更点（維持）:
+     【Fix-H】image 系モデル除外
+     【Fix-G】管理者モデル設定・自動追随・エラー通知機構
+     【Fix-F】FALLBACK_MODEL_CHAIN 優先順位変更
+     【Fix-E】_callApi JSONパースロジック全面改修
+     【Fix-D】コリニア重複対策
+     【Fix-A/B/C】gridN修正・端点重複除去・プロンプト制約追加
+===================================================================== */
 
 const _G = (() => {
 
-/* §1. 定数 */
+/* ====================================================================
+   § 1. 定数
+==================================================================== */
 const BASE_URL               = 'https://generativelanguage.googleapis.com/v1beta';
 const MODEL_CACHE_KEY        = 'gemini_model_v3';
 const MODEL_CACHE_TTL        = 24 * 60 * 60 * 1000;
@@ -22,6 +34,7 @@ const NO_MIME_CACHE_TTL      = 7 * 24 * 60 * 60 * 1000;
 const LIVE_MODELS_CACHE_KEY  = 'gemini_live_models_v1';
 const LIVE_MODELS_CACHE_TTL  = 60 * 60 * 1000;
 const ADMIN_CHAIN_KEY        = 'gemini_admin_chain_v1';
+const ADMIN_STATUS_KEY       = 'gemini_admin_status_v1'; // 【Fix-I】admin.html 共有用
 
 const FALLBACK_MODEL_CHAIN = [
   'gemini-2.5-flash-lite',
@@ -29,8 +42,7 @@ const FALLBACK_MODEL_CHAIN = [
   'gemini-2.5-flash'
 ];
 
-// ── 【Fix-H】 image 系を追加 ──
-const EXCLUDED_KEYWORDS  = ['pro', 'image'];
+const EXCLUDED_KEYWORDS  = ['pro', 'image']; // Fix-H: image 除外追加済み
 const PREFERRED_KEYWORDS = ['flash-lite', 'flash'];
 
 const FETCH_TIMEOUT_MS       = 8000;
@@ -45,7 +57,9 @@ const LEVEL_CFG = {
   3: { lines: 5, gridN: 4, lo: 0, hi: 8, hints: 0 }
 };
 
-/* §2. 交差判定ヘルパー */
+/* ====================================================================
+   § 2. 交差判定ヘルパー（problems.js の _cross と完全一致）
+==================================================================== */
 function _cross(ax,ay,bx,by,cx,cy,dx,dy){
   if((ax===cx&&ay===cy)||(ax===dx&&ay===dy))return false;
   if((bx===cx&&by===cy)||(bx===dx&&by===dy))return false;
@@ -81,12 +95,16 @@ function _hasCollinearOverlap(lines){
   return false;
 }
 
-/* §3. バリデーション */
+/* ====================================================================
+   § 3. バリデーション
+==================================================================== */
 function _validate(problem,cfg){
   return _countCross(problem.lines)>=cfg.lo&&_countCross(problem.lines)<=cfg.hi;
 }
 
-/* §4. 正規化 */
+/* ====================================================================
+   § 4. 正規化
+==================================================================== */
 function _normalise(raw,level){
   const cfg=LEVEL_CFG[level]??LEVEL_CFG[1];
   const maxC=cfg.gridN;
@@ -102,7 +120,7 @@ function _normalise(raw,level){
   lines=lines.filter(l=>{
     const key=(l.x1<l.x2||(l.x1===l.x2&&l.y1<=l.y2))
       ?`${l.x1},${l.y1},${l.x2},${l.y2}`:`${l.x2},${l.y2},${l.x1},${l.y1}`;
-    if(seen.has(key)){console.warn(`[gemini] 重複除去`);return false;}
+    if(seen.has(key)){console.warn('[gemini] 重複除去');return false;}
     seen.add(key);return true;
   });
   if(_hasCollinearOverlap(lines)){console.warn('[gemini] コリニア重複→棄却');return null;}
@@ -110,7 +128,9 @@ function _normalise(raw,level){
   return{level,grid:{cols:cfg.gridN+1,rows:cfg.gridN+1},lines,hintLines:lines.slice(0,cfg.hints)};
 }
 
-/* §5. JSONパーサー */
+/* ====================================================================
+   § 5. テキスト抽出パーサー
+==================================================================== */
 function _extractJsonArray(text){
   if(!text)return null;
   const s=text.replace(/```(?:json)?\s*([\s\S]*?)```/g,'$1').trim();
@@ -123,34 +143,98 @@ function _extractJsonArray(text){
     }}catch(_){}
   }
   const objs=[];
-  for(const line of s.split('\n')){const t=line.trim();if(t.startsWith('{')&&t.endsWith('}')){try{const o=JSON.parse(t);if(o&&'lines'in o)objs.push(o);}catch(_){}}}
+  for(const line of s.split('\n')){
+    const t=line.trim();
+    if(t.startsWith('{')&&t.endsWith('}')){
+      try{const o=JSON.parse(t);if(o&&'lines'in o)objs.push(o);}catch(_){}
+    }
+  }
   return objs.length>0?objs:null;
 }
-function _extractAllArrayStrings(text){const r=[];let d=0,s=-1;for(let i=0;i<text.length;i++){if(text[i]==='['){if(!d)s=i;d++;}else if(text[i]===']'){d--;if(!d&&s!==-1){r.push(text.slice(s,i+1));s=-1;}}}return r;}
-function _extractAllObjectStrings(text){const r=[];let d=0,s=-1;for(let i=0;i<text.length;i++){if(text[i]==='{'){if(!d)s=i;d++;}else if(text[i]==='}'){d--;if(!d&&s!==-1){r.push(text.slice(s,i+1));s=-1;}}}return r;}
+function _extractAllArrayStrings(text){
+  const r=[];let d=0,s=-1;
+  for(let i=0;i<text.length;i++){
+    if(text[i]==='['){if(!d)s=i;d++;}
+    else if(text[i]===']'){d--;if(!d&&s!==-1){r.push(text.slice(s,i+1));s=-1;}}
+  }
+  return r;
+}
+function _extractAllObjectStrings(text){
+  const r=[];let d=0,s=-1;
+  for(let i=0;i<text.length;i++){
+    if(text[i]==='{'){if(!d)s=i;d++;}
+    else if(text[i]==='}'){d--;if(!d&&s!==-1){r.push(text.slice(s,i+1));s=-1;}}
+  }
+  return r;
+}
 
-/* §6. no-mime キャッシュ */
+/* ====================================================================
+   § 6. no-mime キャッシュ管理
+==================================================================== */
 function _isNoMimeCached(model){
-  try{const raw=localStorage.getItem(NO_MIME_CACHE_KEY);if(!raw)return false;
+  try{
+    const raw=localStorage.getItem(NO_MIME_CACHE_KEY);if(!raw)return false;
     const cache=JSON.parse(raw);const e=cache[model];if(!e)return false;
-    if(Date.now()-e.ts>=NO_MIME_CACHE_TTL){delete cache[model];localStorage.setItem(NO_MIME_CACHE_KEY,JSON.stringify(cache));return false;}
-    return true;}catch(_){return false;}
+    if(Date.now()-e.ts>=NO_MIME_CACHE_TTL){
+      delete cache[model];localStorage.setItem(NO_MIME_CACHE_KEY,JSON.stringify(cache));return false;
+    }
+    return true;
+  }catch(_){return false;}
 }
 function _setNoMimeCache(model){
-  try{const raw=localStorage.getItem(NO_MIME_CACHE_KEY);const cache=raw?JSON.parse(raw):{};cache[model]={ts:Date.now()};localStorage.setItem(NO_MIME_CACHE_KEY,JSON.stringify(cache));}catch(_){}
+  try{
+    const raw=localStorage.getItem(NO_MIME_CACHE_KEY);
+    const cache=raw?JSON.parse(raw):{};
+    cache[model]={ts:Date.now()};
+    localStorage.setItem(NO_MIME_CACHE_KEY,JSON.stringify(cache));
+  }catch(_){}
 }
 
-/* §7. モデルキャッシュ・ライブ取得・チェーン構築 */
-function _saveModel(model){try{localStorage.setItem(MODEL_CACHE_KEY,JSON.stringify({model,ts:Date.now()}));}catch(_){}}
-function clearModelCache(){try{localStorage.removeItem(MODEL_CACHE_KEY);localStorage.removeItem(LIVE_MODELS_CACHE_KEY);}catch(_){}}
-function saveAdminChain(chain){try{localStorage.setItem(ADMIN_CHAIN_KEY,JSON.stringify({chain,ts:Date.now()}));console.log(`[gemini] 管理者チェーン保存: ${chain.join(' → ')}`);}catch(_){}}
-function loadAdminChain(){try{const raw=localStorage.getItem(ADMIN_CHAIN_KEY);if(!raw)return null;const{chain}=JSON.parse(raw);return Array.isArray(chain)&&chain.length>0?chain:null;}catch(_){return null;}}
+/* ====================================================================
+   § 7. モデルキャッシュ・ライブ取得・チェーン構築
+==================================================================== */
+
+/**
+ * 【Fix-I】成功モデルを MODEL_CACHE_KEY と ADMIN_STATUS_KEY の
+ * 両方に記録する。admin.html 側でも直近成功モデルを表示できる。
+ */
+function _saveModel(model){
+  try{localStorage.setItem(MODEL_CACHE_KEY,JSON.stringify({model,ts:Date.now()}));}catch(_){}
+  // admin.html 共有ステータスにも lastSuccessModel を更新
+  try{
+    const prev=JSON.parse(localStorage.getItem(ADMIN_STATUS_KEY)||'{}');
+    localStorage.setItem(ADMIN_STATUS_KEY,JSON.stringify({...prev,lastSuccessModel:model,lastSuccessTs:Date.now()}));
+  }catch(_){}
+}
+
+function clearModelCache(){
+  try{localStorage.removeItem(MODEL_CACHE_KEY);localStorage.removeItem(LIVE_MODELS_CACHE_KEY);}catch(_){}
+}
+
+function saveAdminChain(chain){
+  try{
+    localStorage.setItem(ADMIN_CHAIN_KEY,JSON.stringify({chain,ts:Date.now()}));
+    console.log(`[gemini] 管理者チェーン保存: ${chain.join(' → ')}`);
+  }catch(_){}
+}
+function loadAdminChain(){
+  try{
+    const raw=localStorage.getItem(ADMIN_CHAIN_KEY);if(!raw)return null;
+    const{chain}=JSON.parse(raw);
+    return Array.isArray(chain)&&chain.length>0?chain:null;
+  }catch(_){return null;}
+}
 function clearAdminChain(){try{localStorage.removeItem(ADMIN_CHAIN_KEY);}catch(_){}}
 
 async function _fetchLiveModels(apiKey){
   try{
     const raw=localStorage.getItem(LIVE_MODELS_CACHE_KEY);
-    if(raw){const{models,ts}=JSON.parse(raw);if(Date.now()-ts<LIVE_MODELS_CACHE_TTL){console.log(`[gemini] ライブモデルキャッシュ: ${models.length}件`);return models;}}
+    if(raw){
+      const{models,ts}=JSON.parse(raw);
+      if(Date.now()-ts<LIVE_MODELS_CACHE_TTL){
+        console.log(`[gemini] ライブモデルキャッシュ: ${models.length}件`);return models;
+      }
+    }
   }catch(_){}
   try{
     const ctrl=new AbortController();const tid=setTimeout(()=>ctrl.abort(),5000);
@@ -163,7 +247,6 @@ async function _fetchLiveModels(apiKey){
         const name=m.name?.replace(/^models\//,'')||'';
         const supported=(m.supportedGenerationMethods||[]).includes('generateContent');
         const isFlash=name.includes('flash');
-        // 【Fix-H】pro と image を両方除外
         const isExcluded=EXCLUDED_KEYWORDS.some(kw=>name.includes(kw));
         return supported&&isFlash&&!isExcluded;
       })
@@ -177,22 +260,34 @@ async function _fetchLiveModels(apiKey){
 async function _buildEffectiveChain(apiKey){
   const liveModels=await _fetchLiveModels(apiKey);
   const adminChain=loadAdminChain();
-  if(!liveModels){const chain=adminChain||FALLBACK_MODEL_CHAIN;return{chain,needsRedo:false,liveModels:null};}
+  if(!liveModels){
+    const chain=adminChain||FALLBACK_MODEL_CHAIN;
+    return{chain,needsRedo:false,liveModels:null};
+  }
   if(adminChain){
     const alive=adminChain.filter(m=>liveModels.includes(m));
-    const dead=adminChain.filter(m=>!liveModels.includes(m));
-    if(dead.length>0){console.warn(`[gemini] 廃止モデル: ${dead.join(', ')}`);return{chain:alive.length>0?alive:FALLBACK_MODEL_CHAIN,needsRedo:true,liveModels};}
+    const dead =adminChain.filter(m=>!liveModels.includes(m));
+    if(dead.length>0){
+      console.warn(`[gemini] 廃止モデル: ${dead.join(', ')}`);
+      return{chain:alive.length>0?alive:FALLBACK_MODEL_CHAIN,needsRedo:true,liveModels};
+    }
     return{chain:adminChain,needsRedo:false,liveModels};
   }
   const alive=FALLBACK_MODEL_CHAIN.filter(m=>liveModels.includes(m));
   const inChain=new Set(FALLBACK_MODEL_CHAIN);
   const supplements=[];
-  for(const kw of PREFERRED_KEYWORDS){for(const m of liveModels){if(m.includes(kw)&&!inChain.has(m)&&!supplements.includes(m)){supplements.push(m);break;}}}
+  for(const kw of PREFERRED_KEYWORDS){
+    for(const m of liveModels){
+      if(m.includes(kw)&&!inChain.has(m)&&!supplements.includes(m)){supplements.push(m);break;}
+    }
+  }
   const chain=[...alive,...supplements];
   return{chain:chain.length>0?chain:FALLBACK_MODEL_CHAIN,needsRedo:false,liveModels};
 }
 
-/* §9. プロンプト生成 */
+/* ====================================================================
+   § 9. プロンプト生成
+==================================================================== */
 function _buildPrompt(level,count){
   const cfg=LEVEL_CFG[level]??LEVEL_CFG[1];
   const{lines:lineCount,gridN,lo,hi}=cfg;
@@ -220,7 +315,9 @@ Output ONLY a JSON array:
 [{"lines":[{"x1":0,"y1":0,"x2":2,"y2":3},...${lineCount} lines]},... ${count} problems]`;
 }
 
-/* §10. フォールバック問題バンク */
+/* ====================================================================
+   § 10. フォールバック問題バンク
+==================================================================== */
 const _FALLBACK={
   0:[
     {lines:[{x1:0,y1:0,x2:3,y2:0},{x1:0,y1:1,x2:3,y2:1},{x1:0,y1:2,x2:3,y2:2}]},
@@ -252,13 +349,23 @@ const _FALLBACK={
   ]
 };
 function _getFallback(level,count){
-  const pool=(typeof PROBLEM_BANK!=='undefined'&&PROBLEM_BANK[level]?PROBLEM_BANK[level]:_FALLBACK[level]||_FALLBACK[1]).slice();
-  for(let i=pool.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[pool[i],pool[j]]=[pool[j],pool[i]];}
+  const pool=(typeof PROBLEM_BANK!=='undefined'&&PROBLEM_BANK[level]
+    ?PROBLEM_BANK[level]:_FALLBACK[level]||_FALLBACK[1]).slice();
+  for(let i=pool.length-1;i>0;i--){
+    const j=Math.floor(Math.random()*(i+1));[pool[i],pool[j]]=[pool[j],pool[i]];
+  }
   const cfg=LEVEL_CFG[level]??LEVEL_CFG[1];
-  return pool.slice(0,count).map(p=>({level,grid:p.grid??{cols:cfg.gridN+1,rows:cfg.gridN+1},lines:p.lines,hintLines:p.hintLines||p.lines.slice(0,cfg.hints)}));
+  return pool.slice(0,count).map(p=>({
+    level,
+    grid:p.grid??{cols:cfg.gridN+1,rows:cfg.gridN+1},
+    lines:p.lines,
+    hintLines:p.hintLines||p.lines.slice(0,cfg.hints)
+  }));
 }
 
-/* §11. API送信コア */
+/* ====================================================================
+   § 11. API 送信コア
+==================================================================== */
 async function _callApi(model,apiKey,prompt,forcePlain=false){
   const generationConfig={temperature:0.7,maxOutputTokens:2048};
   const useJsonMode=!forcePlain&&!_isNoMimeCached(model);
@@ -267,13 +374,22 @@ async function _callApi(model,apiKey,prompt,forcePlain=false){
   const ctrl=new AbortController();const tid=setTimeout(()=>ctrl.abort(),FETCH_TIMEOUT_MS);
   let resp;
   try{
-    resp=await fetch(`${BASE_URL}/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`,
+    resp=await fetch(
+      `${BASE_URL}/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`,
       {method:'POST',headers:{'Content-Type':'application/json'},signal:ctrl.signal,
        body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig})});
     clearTimeout(tid);
-  }catch(e){clearTimeout(tid);const isTimeout=e.name==='AbortError';console.warn(`[gemini] ${isTimeout?'タイムアウト':'ネットワークエラー'}: ${model}`);return{raw:null,status:isTimeout?408:0};}
+  }catch(e){
+    clearTimeout(tid);
+    const isTimeout=e.name==='AbortError';
+    console.warn(`[gemini] ${isTimeout?'タイムアウト':'ネットワークエラー'}: ${model}`);
+    return{raw:null,status:isTimeout?408:0};
+  }
   if(resp.status===400&&useJsonMode){_setNoMimeCache(model);return _callApi(model,apiKey,prompt,true);}
-  if(resp.status===404||resp.status===410){console.warn(`[gemini] HTTP ${resp.status}: ${model} 廃止の可能性`);return{raw:null,status:resp.status};}
+  if(resp.status===404||resp.status===410){
+    console.warn(`[gemini] HTTP ${resp.status}: ${model} 廃止の可能性`);
+    return{raw:null,status:resp.status};
+  }
   if(!resp.ok){console.warn(`[gemini] HTTP ${resp.status}: ${model}`);return{raw:null,status:resp.status};}
   let data;try{data=await resp.json();}catch(e){return{raw:null,status:200};}
   const part=data?.candidates?.[0]?.content?.parts?.[0];
@@ -283,13 +399,22 @@ async function _callApi(model,apiKey,prompt,forcePlain=false){
   console.log('[gemini] text length:',text!==null?text.length:'null');
   let problems=null;
   if(useJsonMode){
-    if(text!==null){try{const p=JSON.parse(text);problems=Array.isArray(p)&&p.length>0?p:_extractJsonArray(text);}catch(e){problems=_extractJsonArray(text);}}
-    else{problems=_extractJsonArray(JSON.stringify(data));if(!problems||problems.length===0){_setNoMimeCache(model);return _callApi(model,apiKey,prompt,true);}}
-  }else{problems=text!==null?_extractJsonArray(text):_extractJsonArray(JSON.stringify(data));}
+    if(text!==null){
+      try{const p=JSON.parse(text);problems=Array.isArray(p)&&p.length>0?p:_extractJsonArray(text);}
+      catch(e){problems=_extractJsonArray(text);}
+    }else{
+      problems=_extractJsonArray(JSON.stringify(data));
+      if(!problems||problems.length===0){_setNoMimeCache(model);return _callApi(model,apiKey,prompt,true);}
+    }
+  }else{
+    problems=text!==null?_extractJsonArray(text):_extractJsonArray(JSON.stringify(data));
+  }
   return{raw:problems,status:resp.status};
 }
 
-/* §12. レスポンス検証・正規化 */
+/* ====================================================================
+   § 12. レスポンス検証・正規化
+==================================================================== */
 function _processRaw(raw,level,need){
   if(!Array.isArray(raw)||raw.length===0)return[];
   const cfg=LEVEL_CFG[level]??LEVEL_CFG[1];
@@ -303,21 +428,52 @@ function _processRaw(raw,level,need){
   return valid;
 }
 
-/* §13. メインAPI: generateProblems */
+/* ====================================================================
+   § 13. メイン API: generateProblems
+==================================================================== */
+
+/**
+ * 【Fix-I】_updateStatus
+ *
+ * window._geminiStatus（同一ページ内通知）と
+ * localStorage('gemini_admin_status_v1')（admin.html 共有）の
+ * 両方にステータスをマージ書き込みする。
+ *
+ * admin.html は別ページのため window イベントは届かないが、
+ * localStorage を定期読み取り or ページ表示時に読み込むことで
+ * ゲーム画面でのエラー・成功履歴を確実に参照できる。
+ */
 function _updateStatus(patch){
+  // ── ① 同一ページ内: window._geminiStatus + カスタムイベント ──
   try{
     if(!window._geminiStatus)window._geminiStatus={errorCount:0,needsAdminRedo:false};
     Object.assign(window._geminiStatus,patch);
     window.dispatchEvent(new CustomEvent('geminiStatusUpdate',{detail:window._geminiStatus}));
   }catch(_){}
+
+  // ── ② 【Fix-I】別ページ(admin.html)向け: localStorage に永続化 ──
+  try{
+    const prev=JSON.parse(localStorage.getItem(ADMIN_STATUS_KEY)||'{}');
+    const merged={...prev,...patch,lastUpdatedTs:Date.now()};
+    localStorage.setItem(ADMIN_STATUS_KEY,JSON.stringify(merged));
+  }catch(_){}
 }
 
 async function generateProblems(level,count=5,apiKey){
-  if(!apiKey){console.log('[gemini] APIキーなし→フォールバック');return _getFallback(level,count);}
+  if(!apiKey){
+    console.log('[gemini] APIキーなし→フォールバック');
+    return _getFallback(level,count);
+  }
   const{chain,needsRedo,liveModels}=await _buildEffectiveChain(apiKey);
   _updateStatus({currentChain:chain,liveModels:liveModels||[]});
-  if(needsRedo)_updateStatus({needsAdminRedo:true,lastError:'設定済みモデルが廃止されました。モデル設定を更新してください。'});
-  if(chain.length===0){const msg='AIモデルが全て利用不可です。管理者設定でモデルを更新してください。';_updateStatus({needsAdminRedo:true,lastError:msg});return _getFallback(level,count);}
+  if(needsRedo){
+    _updateStatus({needsAdminRedo:true,lastError:'設定済みモデルが廃止されました。モデル設定を更新してください。'});
+  }
+  if(chain.length===0){
+    const msg='AIモデルが全て利用不可です。管理者設定でモデルを更新してください。';
+    _updateStatus({needsAdminRedo:true,lastError:msg});
+    return _getFallback(level,count);
+  }
   const prompt=_buildPrompt(level,count);
   let sessionErrors=0;
   for(const model of chain){
@@ -326,28 +482,68 @@ async function generateProblems(level,count=5,apiKey){
     while(attempts<MAX_ATTEMPTS_PER_MODEL){
       attempts++;
       const{raw,status}=await _callApi(model,apiKey,prompt);
-      if(status===401||status===403){console.error('[gemini] 認証エラー');_updateStatus({lastError:'APIキーが無効です。APIキーを確認してください。'});return _getFallback(level,count);}
-      if(status===408||status===0){sessionErrors++;_updateStatus({errorCount:(window._geminiStatus?.errorCount||0)+1,lastError:`タイムアウト (${model})`});break;}
-      if(status===404||status===410){sessionErrors++;_updateStatus({errorCount:(window._geminiStatus?.errorCount||0)+1,needsAdminRedo:true,lastError:`モデル廃止検出 (${model})。管理者設定でモデルを更新してください。`});break;}
-      if(status===429){count429++;sessionErrors++;_updateStatus({errorCount:(window._geminiStatus?.errorCount||0)+1,lastError:`レート制限 (${model})`});if(count429>=MAX_429_PER_MODEL)break;await new Promise(r=>setTimeout(r,1000*Math.pow(2,count429-1)));continue;}
+      if(status===401||status===403){
+        console.error('[gemini] 認証エラー');
+        _updateStatus({lastError:'APIキーが無効です。APIキーを確認してください。'});
+        return _getFallback(level,count);
+      }
+      if(status===408||status===0){
+        sessionErrors++;
+        _updateStatus({errorCount:(window._geminiStatus?.errorCount||0)+1,
+          lastError:`タイムアウト (${model})`});
+        break;
+      }
+      if(status===404||status===410){
+        sessionErrors++;
+        _updateStatus({errorCount:(window._geminiStatus?.errorCount||0)+1,
+          needsAdminRedo:true,
+          lastError:`モデル廃止検出 (${model})。管理者設定でモデルを更新してください。`});
+        break;
+      }
+      if(status===429){
+        count429++;sessionErrors++;
+        _updateStatus({errorCount:(window._geminiStatus?.errorCount||0)+1,
+          lastError:`レート制限 (${model})`});
+        if(count429>=MAX_429_PER_MODEL)break;
+        await new Promise(r=>setTimeout(r,1000*Math.pow(2,count429-1)));
+        continue;
+      }
       const valid=_processRaw(raw,level,count);
-      if(valid.length>=count){_saveModel(model);console.log(`[gemini] ${model} 成功: ${valid.length}件`);return valid.slice(0,count);}
-      sessionErrors++;_updateStatus({errorCount:(window._geminiStatus?.errorCount||0)+1,lastError:`有効問題不足 (${model}: ${valid.length}/${count})`});
+      if(valid.length>=count){
+        _saveModel(model); // Fix-I: ADMIN_STATUS_KEY にも lastSuccessModel を書き込む
+        console.log(`[gemini] ${model} 成功: ${valid.length}件`);
+        return valid.slice(0,count);
+      }
+      sessionErrors++;
+      _updateStatus({errorCount:(window._geminiStatus?.errorCount||0)+1,
+        lastError:`有効問題不足 (${model}: ${valid.length}/${count})`});
     }
-    if(sessionErrors>=ERROR_NOTIFY_THRESHOLD)_updateStatus({needsAdminRedo:true,lastError:`エラーが${sessionErrors}回発生しました。モデル設定の確認を推奨します。`});
+    if(sessionErrors>=ERROR_NOTIFY_THRESHOLD){
+      _updateStatus({needsAdminRedo:true,
+        lastError:`エラーが${sessionErrors}回発生しました。モデル設定の確認を推奨します。`});
+    }
   }
-  console.warn('[gemini] 全モデル失敗→フォールバック');return _getFallback(level,count);
+  console.warn('[gemini] 全モデル失敗→フォールバック');
+  return _getFallback(level,count);
 }
 
-/* §14. APIキー管理 */
+/* ====================================================================
+   § 14. API キー管理
+==================================================================== */
 const API_KEY_STORAGE='gemini_api_key';
 function saveApiKey(key){try{localStorage.setItem(API_KEY_STORAGE,key);}catch(_){}}
 function loadApiKey(){try{return localStorage.getItem(API_KEY_STORAGE)||'';}catch(_){return '';}}
 
-/* §15. エクスポート */
-return{generateProblems,saveApiKey,loadApiKey,clearModelCache,
-       saveAdminChain,loadAdminChain,clearAdminChain,
-       fetchLiveModels:_fetchLiveModels};
+/* ====================================================================
+   § 15. エクスポート
+==================================================================== */
+return{
+  generateProblems,
+  saveApiKey,loadApiKey,clearModelCache,
+  saveAdminChain,loadAdminChain,clearAdminChain,
+  fetchLiveModels:_fetchLiveModels
+};
+
 })();
 
 const generateProblems = _G.generateProblems;
