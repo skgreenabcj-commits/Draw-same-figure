@@ -1,399 +1,360 @@
 /**
- * admin.js  v1.1
- * 管理者設定画面（admin.html）専用ロジック
- *
- * 【v1.1 変更点】
- *   - §5 アラートログセクションを新規追加
- *     - localStorage('gemini_alert_log_v1') からアラートを読み込み表示
- *     - 各エントリ: ts（日時）・alertType・message・model・rawJson を表示
- *     - 「アラートログをクリア」ボタンを追加
- *   - §3 の admin_log_v1 は操作ログとして維持（混在しない）
- *
- * 依存: gemini.js（saveApiKey, loadApiKey, fetchLiveModels,
- *                  saveAdminChain, loadAdminChain, clearAdminChain,
- *                  clearModelCache, getAlertLogKey）
+ * admin.js  v1.1  (完全版)
+ * 変更点 (v1.0 → v1.1):
+ *   - BUG-C: §5 アラートログセクションを完全実装
+ *     - rawJson の <details> 折りたたみ表示
+ *     - initAlertLogSection() を DOMContentLoaded 内で呼び出し
+ *     - クリアボタン (#btn-clear-alert-log) のイベントバインド
+ *   - RISK-1: ALERT_LOG_KEY を GeminiAPI.getAlertLogKey() 経由で取得
  */
 
+/* ============================================================
+   §0. 定数
+   ============================================================ */
 const ADMIN_STATUS_KEY_LOCAL = 'gemini_admin_status_v1';
 const MODEL_CACHE_KEY_LOCAL  = 'gemini_model_v3';
+const ADMIN_LOG_KEY          = 'admin_log_v1';
+const ADMIN_LOG_MAX          = 50;
 
-/* ========================================================
-   操作ログストレージ（admin.js 内の操作記録）
-   ======================================================== */
-const ADMIN_LOG_KEY = 'admin_log_v1';
-const ADMIN_LOG_MAX = 50;
-
-function _loadLog() {
-  try { return JSON.parse(localStorage.getItem(ADMIN_LOG_KEY) || '[]'); } catch(_) { return []; }
+// RISK-1 修正: ハードコードせず GeminiAPI 経由
+function _getAlertLogKey() {
+  return (window.GeminiAPI?.getAlertLogKey) ? window.GeminiAPI.getAlertLogKey() : 'gemini_alert_log_v1';
 }
-function _saveLog(entries) {
-  try { localStorage.setItem(ADMIN_LOG_KEY, JSON.stringify(entries.slice(-ADMIN_LOG_MAX))); } catch(_) {}
+
+/* ============================================================
+   §1. 管理ログ（操作ログ）
+   ============================================================ */
+function _loadAdminLog() {
+  try { return JSON.parse(localStorage.getItem(ADMIN_LOG_KEY) || '[]'); } catch (_) { return []; }
+}
+function _saveAdminLog(logs) {
+  try { localStorage.setItem(ADMIN_LOG_KEY, JSON.stringify(logs)); } catch (_) {}
 }
 function _appendLog(level, message) {
-  const entries = _loadLog();
-  entries.push({ ts: Date.now(), level, message });
-  _saveLog(entries);
+  const logs = _loadAdminLog();
+  logs.unshift({ ts: new Date().toISOString(), level, message });
+  if (logs.length > ADMIN_LOG_MAX) logs.length = ADMIN_LOG_MAX;
+  _saveAdminLog(logs);
+  _renderLog();
 }
 
-/* ========================================================
-   ユーティリティ
-   ======================================================== */
-function _fmt(ts) {
-  const d = new Date(ts);
-  const pad = n => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} `
-       + `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+/* ============================================================
+   §2. ユーティリティ
+   ============================================================ */
+function _fmtTs(isoStr) {
+  if (!isoStr) return '—';
+  try {
+    return new Date(isoStr).toLocaleString('ja-JP', {
+      year:'numeric', month:'2-digit', day:'2-digit',
+      hour:'2-digit', minute:'2-digit', second:'2-digit'
+    });
+  } catch (_) { return isoStr; }
 }
 
-function _setStatus(elId, msg, type = 'info') {
-  const el = document.getElementById(elId);
+function _showStatusMsg(id, msg, type = 'info') {
+  const el = document.getElementById(id);
   if (!el) return;
-  el.textContent = msg;
-  el.className   = `admin-status-msg admin-status-msg--${type}`;
-  el.style.display = msg ? 'block' : 'none';
+  el.textContent  = msg;
+  el.className    = `admin-status-msg ${type}`;
+  el.style.display = 'block';
 }
 
-function _isLite(name) { return name.includes('flash-lite'); }
+function _isFlashLite(name) {
+  return name.toLowerCase().includes('flash-lite');
+}
 
-/* ========================================================
-   §1. APIキーセクション（変更なし）
-   ======================================================== */
+/* ============================================================
+   §3. API キーセクション
+   ============================================================ */
 function initApiKeySection() {
-  const inputEl = document.getElementById('input-admin-apikey');
-  const eyeBtn  = document.getElementById('btn-admin-apikey-show');
-  const eyeIcon = document.getElementById('apikey-eye-icon');
+  const input   = document.getElementById('input-admin-apikey');
+  const showBtn = document.getElementById('btn-admin-apikey-show');
   const saveBtn = document.getElementById('btn-admin-apikey-save');
 
-  const saved = loadApiKey();
-  if (saved) { inputEl.value = saved; _setStatus('apikey-status', '✅ APIキーが設定されています', 'ok'); }
+  if (!input) return;
 
-  eyeBtn.addEventListener('click', () => {
-    const isPassword = inputEl.type === 'password';
-    inputEl.type      = isPassword ? 'text' : 'password';
-    eyeIcon.className = isPassword ? 'fa fa-eye-slash' : 'fa fa-eye';
-  });
-
-  saveBtn.addEventListener('click', () => {
-    const key = inputEl.value.trim();
-    if (key) {
-      saveApiKey(key);
-      clearModelCache();
-      _setStatus('apikey-status', '✅ APIキーを保存しました', 'ok');
-      _appendLog('info', 'APIキーを更新しました');
-      if (!document.getElementById('select-model-1').disabled) fetchAndPopulateModels(key);
-    } else {
-      saveApiKey('');
-      clearModelCache();
-      _setStatus('apikey-status', '⚠️ APIキーをクリアしました', 'warn');
-      _appendLog('warn', 'APIキーをクリアしました');
-    }
-  });
-}
-
-/* ========================================================
-   §2. モデル優先順位セクション（変更なし）
-   ======================================================== */
-let _liveModels = [];
-
-async function fetchAndPopulateModels(apiKey) {
-  _setStatus('models-fetch-status', '🔄 モデル一覧を取得中...', 'info');
-  try { localStorage.removeItem('gemini_live_models_v1'); } catch(_) {}
-
-  const models = await fetchLiveModels(apiKey);
-  if (!models || models.length === 0) {
-    _setStatus('models-fetch-status', '❌ モデル一覧の取得に失敗しました。ネットワークとAPIキーを確認してください。', 'error');
-    _appendLog('error', 'ライブモデル取得失敗');
-    return;
+  // ロード
+  const saved = GeminiAPI.loadApiKey();
+  if (saved) {
+    input.value = saved;
+    _showStatusMsg('apikey-status', 'APIキーが設定されています', 'ok');
   }
 
-  _liveModels = models;
-  _setStatus('models-fetch-status', `✅ ${models.length}件のモデルを取得しました`, 'ok');
-  _appendLog('info', `ライブモデル取得成功: ${models.join(', ')}`);
-
-  const current = loadAdminChain() || [];
-
-  [1, 2, 3].forEach(priority => {
-    const sel = document.getElementById(`select-model-${priority}`);
-    sel.innerHTML = '';
-
-    if (priority > 1) {
-      const noneOpt = document.createElement('option');
-      noneOpt.value       = '';
-      noneOpt.textContent = '— なし —';
-      sel.appendChild(noneOpt);
-    }
-
-    models.forEach(m => {
-      const opt       = document.createElement('option');
-      opt.value       = m;
-      opt.textContent = _isLite(m) ? `${m}　★推奨` : m;
-      sel.appendChild(opt);
-    });
-
-    sel.disabled = false;
-
-    if (current[priority - 1]) {
-      sel.value = current[priority - 1];
-    } else if (priority === 1) {
-      const lite = models.find(m => _isLite(m));
-      sel.value = lite || models[0] || '';
-    }
-
-    _updatePriorityNote(priority);
-    sel.addEventListener('change', () => _updatePriorityNote(priority));
+  // 表示切替
+  showBtn?.addEventListener('click', () => {
+    input.type = input.type === 'password' ? 'text' : 'password';
+    showBtn.textContent = input.type === 'password' ? '表示' : '隠す';
   });
 
-  document.getElementById('btn-save-chain').disabled = false;
-  _renderCurrentChain();
+  // 保存
+  saveBtn?.addEventListener('click', () => {
+    const val = input.value.trim();
+    if (!val) { _showStatusMsg('apikey-status', 'APIキーを入力してください', 'warn'); return; }
+    GeminiAPI.saveApiKey(val);
+    _showStatusMsg('apikey-status', '保存しました', 'ok');
+    _appendLog('info', 'APIキーを保存しました');
+  });
+
+  // キャッシュクリア
+  document.getElementById('btn-clear-cache')?.addEventListener('click', () => {
+    GeminiAPI.clearModelCache();
+    _showStatusMsg('apikey-status', 'モデルキャッシュをクリアしました', 'info');
+    _appendLog('info', 'モデルキャッシュをクリア');
+  });
 }
 
-function _updatePriorityNote(priority) {
-  const sel  = document.getElementById(`select-model-${priority}`);
-  const note = document.getElementById(`note-model-${priority}`);
-  if (!sel || !note) return;
-  note.textContent = _isLite(sel.value) ? '★ 推奨モデルです' : '';
-  note.className   = _isLite(sel.value) ? 'priority-note priority-note--recommend' : 'priority-note';
+/* ============================================================
+   §4. モデル優先度セクション
+   ============================================================ */
+function initModelSection() {
+  const fetchBtn  = document.getElementById('btn-fetch-models');
+  const saveBtn   = document.getElementById('btn-save-chain');
+  const clearBtn  = document.getElementById('btn-clear-chain');
+  const selects   = [
+    document.getElementById('select-model-1'),
+    document.getElementById('select-model-2'),
+    document.getElementById('select-model-3')
+  ];
+
+  fetchBtn?.addEventListener('click', async () => {
+    _showStatusMsg('model-status', 'モデルを取得中...', 'info');
+    try {
+      const models = await GeminiAPI.fetchLiveModels();
+      selects.forEach((sel, i) => {
+        if (!sel) return;
+        sel.innerHTML = '';
+        if (i > 0) {
+          const none = document.createElement('option');
+          none.value = ''; none.textContent = '— なし —';
+          sel.appendChild(none);
+        }
+        models.forEach(m => {
+          const opt = document.createElement('option');
+          opt.value = m;
+          opt.textContent = _isFlashLite(m) ? `⭐ ${m} (推奨)` : m;
+          sel.appendChild(opt);
+        });
+        sel.disabled = false;
+      });
+      // 推奨デフォルト
+      const flashLite = models.find(_isFlashLite);
+      if (flashLite && selects[0]) selects[0].value = flashLite;
+
+      _renderCurrentChain();
+      _showStatusMsg('model-status', `${models.length} 件取得`, 'ok');
+      _appendLog('info', `モデル ${models.length} 件を取得`);
+    } catch (err) {
+      _showStatusMsg('model-status', `取得失敗: ${err.message}`, 'error');
+      _appendLog('error', `モデル取得失敗: ${err.message}`);
+    }
+  });
+
+  saveBtn?.addEventListener('click', () => {
+    const chain = selects
+      .map(sel => sel?.value || '')
+      .filter(Boolean);
+
+    if (chain.length === 0) {
+      _showStatusMsg('model-status', '少なくとも1つのモデルを選択してください', 'warn');
+      return;
+    }
+    // 重複チェック
+    if (new Set(chain).size !== chain.length) {
+      _showStatusMsg('model-status', '重複するモデルがあります', 'warn');
+      return;
+    }
+    GeminiAPI.saveAdminChain(chain);
+    _renderCurrentChain();
+    _showStatusMsg('model-status', 'チェーンを保存しました', 'ok');
+    _appendLog('info', `チェーン保存: ${chain.join(' → ')}`);
+  });
+
+  clearBtn?.addEventListener('click', () => {
+    GeminiAPI.clearAdminChain();
+    selects.forEach(sel => { if (sel) sel.disabled = true; });
+    _renderCurrentChain();
+    _showStatusMsg('model-status', 'チェーンをリセットしました', 'info');
+    _appendLog('warn', 'チェーンをリセット');
+  });
+
+  _renderCurrentChain();
 }
 
 function _renderCurrentChain() {
-  const chain  = loadAdminChain();
-  const box    = document.getElementById('current-chain-display');
-  const badges = document.getElementById('current-chain-badges');
-  if (!chain || chain.length === 0) { box.style.display = 'none'; return; }
-  box.style.display = 'block';
-  badges.innerHTML  = chain.map((m, i) =>
-    `<span class="chain-badge chain-badge--${i+1}">${i+1}位: ${m}</span>`
+  const container = document.getElementById('current-chain-display');
+  if (!container) return;
+  const chain = GeminiAPI.loadAdminChain();
+  if (!chain || chain.length === 0) {
+    container.innerHTML = '<span class="chain-empty">未設定（フォールバック使用）</span>';
+    return;
+  }
+  container.innerHTML = chain.map((m, i) =>
+    `<span class="chain-badge priority-${i + 1}">${i + 1}. ${m}</span>`
   ).join('');
 }
 
-function saveChain() {
-  const sel1 = document.getElementById('select-model-1').value;
-  const sel2 = document.getElementById('select-model-2').value;
-  const sel3 = document.getElementById('select-model-3').value;
-
-  if (!sel1) { _setStatus('chain-save-status', '⚠️ 第1優先モデルを選択してください', 'warn'); return; }
-
-  const chosen = [sel1, sel2, sel3].filter(Boolean);
-  const unique  = [...new Set(chosen)];
-  if (unique.length < chosen.length) {
-    _setStatus('chain-save-status', '⚠️ 同じモデルを複数の優先順位に設定することはできません', 'warn');
-    return;
-  }
-
-  saveAdminChain(unique);
-  clearModelCache();
-  _setStatus('chain-save-status', `✅ 保存しました: ${unique.join(' → ')}`, 'ok');
-  _appendLog('info', `管理者チェーン保存: ${unique.join(' → ')}`);
-  _renderCurrentChain();
-}
-
-function initModelSection() {
-  document.getElementById('btn-fetch-models').addEventListener('click', () => {
-    const apiKey = loadApiKey();
-    if (!apiKey) {
-      _setStatus('models-fetch-status', '⚠️ 先にAPIキーを保存してください', 'warn');
-      return;
-    }
-    fetchAndPopulateModels(apiKey);
-  });
-
-  document.getElementById('btn-save-chain').addEventListener('click', saveChain);
-
-  document.getElementById('btn-clear-chain').addEventListener('click', () => {
-    if (!confirm('モデル優先設定をリセットします。よろしいですか？')) return;
-    clearAdminChain();
-    clearModelCache();
-    _setStatus('chain-save-status', '🗑️ 設定をリセットしました。デフォルトチェーンが使用されます。', 'info');
-    _appendLog('warn', '管理者チェーンをリセットしました');
-    _renderCurrentChain();
-    [1,2,3].forEach(p => {
-      const sel = document.getElementById(`select-model-${p}`);
-      sel.innerHTML = `<option value="">— モデルを取得してください —</option>`;
-      sel.disabled  = true;
-    });
-    document.getElementById('btn-save-chain').disabled = true;
-  });
-
-  _renderCurrentChain();
-  const apiKey = loadApiKey();
-  if (apiKey) fetchAndPopulateModels(apiKey);
-}
-
-/* ========================================================
-   §3. ステータス／操作ログセクション（変更なし）
-   ======================================================== */
-function _getRecommendedAction(lastError) {
-  if (!lastError) return '';
-  if (lastError.includes('廃止') || lastError.includes('404') || lastError.includes('410'))
-    return '👉 推奨アクション: 「AIモデル優先順位」セクションで利用可能なモデルに更新してください。';
-  if (lastError.includes('APIキーが無効') || lastError.includes('401') || lastError.includes('403'))
-    return '👉 推奨アクション: 「Gemini APIキー設定」セクションでAPIキーを確認・再設定してください。';
-  if (lastError.includes('タイムアウト') || lastError.includes('408'))
-    return '👉 推奨アクション: ネットワーク環境を確認するか、高速なモデル（flash-lite）を第1優先に設定してください。';
-  if (lastError.includes('レート制限') || lastError.includes('429'))
-    return '👉 推奨アクション: しばらく時間をおいてから再試行してください。';
-  if (lastError.includes('CHANGE AI model') || lastError.includes('CHECK AI prompt'))
-    return '👉 推奨アクション: 「AIモデル優先順位」セクションで別のモデルを選択してください。';
-  if (lastError.includes('CONSIDER changing'))
-    return '👉 推奨アクション: 「AIモデル優先順位」のモデルを変更するか、レベル設定を見直してください。';
-  if (lastError.includes('エラーが'))
-    return '👉 推奨アクション: モデル設定を確認し、利用可能なモデルに更新してください。';
-  return '👉 推奨アクション: ゲーム画面を再読み込みして再試行してください。';
-}
-
-function refreshStatus() {
-  const status = _loadAdminStatus();
-
-  document.getElementById('val-error-count').textContent =
-    status.errorCount !== undefined ? String(status.errorCount) : '—';
-  document.getElementById('val-last-model').textContent =
-    status.lastSuccessModel || '—';
-  document.getElementById('val-needs-redo').textContent =
-    status.needsAdminRedo ? '⚠️ 更新が必要' : (status.errorCount > 0 ? '確認推奨' : '✅ 問題なし');
-
-  const errorBox = document.getElementById('last-error-box');
-  if (status.lastError) {
-    errorBox.style.display = 'block';
-    document.getElementById('last-error-msg').textContent    = status.lastError;
-    document.getElementById('last-error-action').textContent = _getRecommendedAction(status.lastError);
-  } else {
-    errorBox.style.display = 'none';
-  }
-
-  renderLog();
-}
-
+/* ============================================================
+   §5. ステータスセクション
+   ============================================================ */
 function _loadAdminStatus() {
-  const base = { errorCount: 0, lastError: '', needsAdminRedo: false, lastSuccessModel: '' };
-  try {
-    const raw = localStorage.getItem(ADMIN_STATUS_KEY_LOCAL);
-    if (raw) return { ...base, ...JSON.parse(raw) };
-  } catch(_) {}
-  return base;
-}
-
-function renderLog() {
-  const entries = _loadLog();
-  const listEl  = document.getElementById('admin-log-list');
-  if (entries.length === 0) {
-    listEl.innerHTML = '<p class="admin-log-empty">ログはまだありません。<br>ゲームでAI生成を行うとここに記録されます。</p>';
-    return;
-  }
-  listEl.innerHTML = [...entries].reverse().map(e =>
-    `<div class="admin-log-entry admin-log-entry--${e.level}">
-       <span class="admin-log-ts">${_fmt(e.ts)}</span>
-       <span class="admin-log-level admin-log-level--${e.level}">${e.level.toUpperCase()}</span>
-       <span class="admin-log-msg">${e.message}</span>
-     </div>`
-  ).join('');
+  try { return JSON.parse(localStorage.getItem(ADMIN_STATUS_KEY_LOCAL) || '{}'); } catch (_) { return {}; }
 }
 
 function initLogSection() {
-  document.getElementById('btn-refresh-status').addEventListener('click', () => {
-    refreshStatus();
-    renderAlertLog(); // 【v1.1】アラートログも同時に更新
+  _renderStatus();
+  _renderLog();
+  document.getElementById('btn-refresh-status')?.addEventListener('click', () => {
+    _renderStatus();
+    _renderLog();
+    _appendLog('info', 'ステータスを手動更新');
   });
-  document.getElementById('btn-clear-log').addEventListener('click', () => {
-    if (!confirm('ログをクリアしますか？')) return;
-    localStorage.removeItem(ADMIN_LOG_KEY);
-    renderLog();
+  document.getElementById('btn-clear-log')?.addEventListener('click', () => {
+    _saveAdminLog([]);
+    _renderLog();
+    _appendLog('info', 'ログをクリア');
   });
-  refreshStatus();
 }
 
-/* ========================================================
-   §4. geminiStatusUpdate パッチ（変更なし）
-   ======================================================== */
-window.addEventListener('geminiStatusUpdate', (e) => {
-  const s = e.detail;
-  if (!s) return;
-  try {
-    const prev = JSON.parse(localStorage.getItem('gemini_admin_status_v1') || '{}');
-    localStorage.setItem('gemini_admin_status_v1', JSON.stringify({ ...prev, ...s }));
-  } catch(_) {}
-  refreshStatus();
-  if (s.lastError) _appendLog(s.needsAdminRedo ? 'error' : 'warn', s.lastError);
-});
+function _renderStatus() {
+  const st = _loadAdminStatus();
 
-/* ========================================================
-   §5. 【v1.1】アラートログセクション
-   ======================================================== */
+  const errCountEl = document.getElementById('status-error-count');
+  if (errCountEl) errCountEl.textContent = st.errorCount ?? 0;
 
-/**
- * alertType バッジの表示ラベルと色クラスを返す。
- */
-function _alertTypeMeta(alertType) {
-  switch (alertType) {
-    case 'MODEL':  return { label: 'MODEL',  cls: 'alert-type--model'  };
-    case 'PROMPT': return { label: 'PROMPT', cls: 'alert-type--prompt' };
-    case 'LEVEL':  return { label: 'LEVEL',  cls: 'alert-type--level'  };
-    default:       return { label: alertType || '?', cls: 'alert-type--other' };
+  const lastModelEl = document.getElementById('status-last-model');
+  if (lastModelEl) lastModelEl.textContent = st.lastSuccessModel || '—';
+
+  const needsUpdateEl = document.getElementById('status-needs-update');
+  if (needsUpdateEl) needsUpdateEl.textContent = st.needsUpdate ? '要更新' : '正常';
+
+  const lastErrorEl = document.getElementById('status-last-error');
+  if (lastErrorEl) {
+    if (st.lastError) {
+      lastErrorEl.textContent = `[${_fmtTs(st.lastErrorTs)}] ${st.lastError}`;
+      lastErrorEl.style.display = 'block';
+    } else {
+      lastErrorEl.style.display = 'none';
+    }
   }
 }
 
+function _renderLog() {
+  const list = document.getElementById('admin-log-list');
+  if (!list) return;
+  const logs = _loadAdminLog();
+  if (logs.length === 0) {
+    list.innerHTML = '<li class="log-empty">ログなし</li>';
+    return;
+  }
+  list.innerHTML = logs.map(entry => `
+    <li class="log-entry log-${entry.level}">
+      <span class="log-ts">${_fmtTs(entry.ts)}</span>
+      <span class="log-level">${entry.level.toUpperCase()}</span>
+      <span class="log-msg">${_escHtml(entry.message)}</span>
+    </li>
+  `).join('');
+}
+
+/* ============================================================
+   §6. アラートログセクション（BUG-C 完全実装）
+   ============================================================ */
+function _loadAlertLog() {
+  try {
+    return JSON.parse(localStorage.getItem(_getAlertLogKey()) || '[]');
+  } catch (_) { return []; }
+}
+
 /**
- * アラートログを DOM に描画する。
- * rawJson は折りたたみ可能な <details> で表示する。
+ * BUG-C 修正: rawJson の折りたたみ表示 / クリアボタンバインド / DOMContentLoaded 内呼び出し
  */
-function renderAlertLog() {
-  const key     = getAlertLogKey();           // 'gemini_alert_log_v1'
-  const listEl  = document.getElementById('alert-log-list');
-  if (!listEl) return;
+function initAlertLogSection() {
+  _renderAlertLog();
 
-  let entries = [];
-  try { entries = JSON.parse(localStorage.getItem(key) || '[]'); } catch(_) {}
+  // クリアボタン
+  document.getElementById('btn-clear-alert-log')?.addEventListener('click', () => {
+    try { localStorage.removeItem(_getAlertLogKey()); } catch (_) {}
+    _renderAlertLog();
+    _appendLog('info', 'アラートログをクリア');
+  });
+}
 
-  // アラート件数バッジを更新
-  const countEl = document.getElementById('val-alert-count');
-  if (countEl) countEl.textContent = String(entries.length);
+function _renderAlertLog() {
+  const list      = document.getElementById('alert-log-list');
+  const countEl   = document.getElementById('alert-count');
+  const logs      = _loadAlertLog();
 
-  if (entries.length === 0) {
-    listEl.innerHTML = '<p class="admin-log-empty">アラートはまだありません。</p>';
+  if (countEl) countEl.textContent = logs.length;
+
+  if (!list) return;
+
+  if (logs.length === 0) {
+    list.innerHTML = '<li class="log-empty">アラートなし</li>';
     return;
   }
 
-  listEl.innerHTML = [...entries].reverse().map((e, idx) => {
-    const meta      = _alertTypeMeta(e.alertType);
-    const rawSafe   = e.rawJson
-      ? String(e.rawJson).replace(/</g,'&lt;').replace(/>/g,'&gt;')
-      : '(なし)';
-    const detailsId = `alert-raw-${idx}`;
+  list.innerHTML = logs.map((entry, idx) => {
+    const badgeClass = {
+      MODEL  : 'alert-type-model',
+      PROMPT : 'alert-type-prompt',
+      LEVEL  : 'alert-type-level'
+    }[entry.alertType] || 'alert-type-unknown';
+
+    // rawJson の折りたたみ（BUG-C 修正: <details><summary> で実装）
+    const rawHtml = entry.rawJson
+      ? `<details class="alert-raw-json">
+           <summary>RAW JSON を表示</summary>
+           <pre>${_escHtml(entry.rawJson)}</pre>
+         </details>`
+      : '';
+
     return `
-      <div class="alert-log-entry alert-log-entry--${(e.alertType||'other').toLowerCase()}">
+      <li class="alert-log-entry">
         <div class="alert-log-header">
-          <span class="alert-log-ts">${_fmt(e.ts)}</span>
-          <span class="alert-type-badge ${meta.cls}">${meta.label}</span>
-          <span class="alert-log-model">${e.model || '—'}</span>
+          <span class="alert-type-badge ${badgeClass}">${entry.alertType || 'UNKNOWN'}</span>
+          <span class="alert-log-ts">${_fmtTs(entry.ts)}</span>
         </div>
-        <div class="alert-log-msg">${e.message || ''}</div>
-        <details class="alert-log-raw" id="${detailsId}">
-          <summary class="alert-log-raw-summary">JSON出力を表示</summary>
-          <pre class="alert-log-raw-pre">${rawSafe}</pre>
-        </details>
-      </div>`;
+        <div class="alert-log-model">🤖 ${_escHtml(entry.model || '—')}</div>
+        <div class="alert-log-msg">${_escHtml(entry.message || '')}</div>
+        ${rawHtml}
+      </li>
+    `;
   }).join('');
 }
 
-function initAlertLogSection() {
-  const clearBtn = document.getElementById('btn-clear-alert-log');
-  if (clearBtn) {
-    clearBtn.addEventListener('click', () => {
-      if (!confirm('アラートログをクリアしますか？')) return;
-      const key = getAlertLogKey();
-      localStorage.removeItem(key);
-      renderAlertLog();
-      _appendLog('warn', 'アラートログをクリアしました');
-    });
+/* ============================================================
+   §7. geminiStatusUpdate リスナー
+   ============================================================ */
+window.addEventListener('geminiStatusUpdate', (e) => {
+  const status = e.detail || {};
+  try {
+    const stored = JSON.parse(localStorage.getItem(ADMIN_STATUS_KEY_LOCAL) || '{}');
+    const merged = Object.assign({}, stored, status, { _ts: new Date().toISOString() });
+    localStorage.setItem(ADMIN_STATUS_KEY_LOCAL, JSON.stringify(merged));
+  } catch (_) {}
+  _renderStatus();
+  if (status.alertType) {
+    _appendLog('error', `アラート受信: [${status.alertType}] ${status.lastError || ''}`);
+    _renderAlertLog();
   }
-  renderAlertLog();
+});
+
+/* ============================================================
+   §8. ユーティリティ: HTML エスケープ
+   ============================================================ */
+function _escHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 }
 
-/* ========================================================
-   DOMContentLoaded
-   ======================================================== */
+/* ============================================================
+   §9. 初期化（BUG-C 修正: DOMContentLoaded 内で initAlertLogSection 呼び出し）
+   ============================================================ */
 document.addEventListener('DOMContentLoaded', () => {
   initApiKeySection();
   initModelSection();
   initLogSection();
-  initAlertLogSection(); // 【v1.1】
+  initAlertLogSection(); // BUG-C 修正: ここで呼び出し確定
 });
