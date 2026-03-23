@@ -1,16 +1,19 @@
 /**
- * app.js  v2.4
+ * app.js  v2.5
  *
- * 【v2.4 変更点】
- *   - 管理者AIモデル設定UIをすべて admin.html へ移管
- *   - openAdminModelPanel / saveAdminModelSettings を削除
- *   - geminiStatusUpdate イベント受信 → エラーバナー表示のみ維持
- *   - バナークリック → admin.html へ遷移
- *   - 初回起動時に APIキー設定済み・管理チェーン未設定なら案内バナー表示
+ * 【v2.5 変更点】
+ *   - generateProblems の戻り値が { problems, validCount, alertType } オブジェクトに変更
+ *     → AppState.problems への代入を .problems に変更
+ *   - alertType に応じたバナーメッセージ切り替え
+ *       'MODEL'  → "CHANGE AI model"
+ *       'PROMPT' → "CHECK AI prompt or CHANGE AI model"
+ *       'LEVEL'  → "CONSIDER changing the level limits"
+ *   - バナーに × 閉じボタンを追加（バナー本文クリックは admin.html 遷移を維持）
+ *   - geminiStatusUpdate リスナーのメッセージもアラート種別で分岐
  *
- * 【v2.3 以前の変更点（維持）】
+ * 【v2.4 以前の変更点（維持）】
+ *   管理者AIモデル設定UIをすべて admin.html へ移管
  *   Promise.race によるタイムアウトガード (30s)
- *   Bug #3/#4/#5 修正
  */
 
 const AppState = {
@@ -113,33 +116,92 @@ function showResult(){
   document.getElementById('result-msg').textContent=msg;
 }
 
+/* ====================================================================
+   バナー表示（× ボタン付き）
+==================================================================== */
+
+/**
+ * 【v2.5】showErrorBanner
+ * バナー本文クリック → admin.html を別タブで開く
+ * × ボタンクリック  → バナーを閉じるのみ（admin.html は開かない）
+ */
+function showErrorBanner(message, type='error'){
+  const banner = document.getElementById('model-error-banner');
+  if(!banner) return;
+
+  // バナー内を再構築（本文スパン + ×ボタン）
+  banner.innerHTML = '';
+
+  const textSpan = document.createElement('span');
+  textSpan.className = 'banner-text';
+  textSpan.textContent = type === 'error'
+    ? `⚠️ AI: ${message}`
+    : `💡 ${message}`;
+
+  const closeBtn = document.createElement('button');
+  closeBtn.className   = 'banner-close';
+  closeBtn.textContent = '×';
+  closeBtn.setAttribute('aria-label', '閉じる');
+  // × ボタン: バナーを閉じるだけ（admin.html は開かない）
+  closeBtn.addEventListener('click', (e) => {
+    e.stopPropagation(); // バナー本文のクリックイベントを発火させない
+    hideErrorBanner();
+  });
+
+  banner.appendChild(textSpan);
+  banner.appendChild(closeBtn);
+  banner.className = `model-error-banner model-error-banner--${type}`;
+  banner.classList.remove('hidden');
+}
+
+function hideErrorBanner(){
+  const banner = document.getElementById('model-error-banner');
+  if(banner) banner.classList.add('hidden');
+}
+
+/* ====================================================================
+   【v2.5】alertType → バナーメッセージ変換
+==================================================================== */
+function _alertTypeToMessage(alertType, fallbackMsg){
+  switch(alertType){
+    case 'MODEL':  return 'CHANGE AI model';
+    case 'PROMPT': return 'CHECK AI prompt or CHANGE AI model';
+    case 'LEVEL':  return 'CONSIDER changing the level limits';
+    default:       return fallbackMsg || alertType || 'AI error occurred';
+  }
+}
+
+/* ====================================================================
+   startGame
+==================================================================== */
 async function startGame(){
   const level=AppState.level;const apiKey=AppState.apiKey;
   if(apiKey){
     showLoading(true);
     try{
       const timeoutPromise=new Promise((_,reject)=>setTimeout(()=>reject(new Error('タイムアウト')),30000));
-      AppState.problems=await Promise.race([generateProblems(level,5,apiKey),timeoutPromise]);
-    }catch(e){console.warn('AI生成失敗:',e.message);AppState.problems=getProblems(level);}
+      // 【v2.5】generateProblems の戻り値が { problems, validCount, alertType } に変更
+      const result = await Promise.race([generateProblems(level,5,apiKey), timeoutPromise]);
+      AppState.problems = result.problems;
+
+      // alertType が設定されていればバナー表示
+      if(result.alertType){
+        showErrorBanner(_alertTypeToMessage(result.alertType), 'error');
+      }
+    }catch(e){
+      console.warn('AI生成失敗:',e.message);
+      AppState.problems=getProblems(level);
+    }
     finally{showLoading(false);}
-  }else{AppState.problems=getProblems(level);}
+  }else{
+    AppState.problems=getProblems(level);
+  }
   AppState.score=0;AppState.currentIndex=0;
   showScreen('screen-game');
   requestAnimationFrame(()=>{requestAnimationFrame(()=>{loadQuestion(0);});});
 }
 
 function showLoading(show){document.getElementById('loading-overlay').classList.toggle('hidden',!show);}
-
-/* ── エラーバナー（admin.html への導線） ── */
-function showErrorBanner(message,type='error'){
-  const banner=document.getElementById('model-error-banner');if(!banner)return;
-  banner.textContent=type==='error'
-    ?`⚠️ AI: ${message}　（タップして管理者設定）`
-    :`💡 ${message}　（タップして管理者設定）`;
-  banner.className=`model-error-banner model-error-banner--${type}`;
-  banner.classList.remove('hidden');
-}
-function hideErrorBanner(){const banner=document.getElementById('model-error-banner');if(banner)banner.classList.add('hidden');}
 
 /* ── イベントバインド ── */
 document.addEventListener('DOMContentLoaded',()=>{
@@ -168,11 +230,16 @@ document.addEventListener('DOMContentLoaded',()=>{
   const savedKey=loadApiKey();
   if(savedKey){AppState.apiKey=savedKey;document.getElementById('input-api-key').value=savedKey;}
 
-  /* admin.html リンク */
+  /* admin.html リンク: バナー本文クリック */
   document.getElementById('btn-admin-model')
     ?.addEventListener('click',()=>{window.open('admin.html','_blank');});
   document.getElementById('model-error-banner')
-    ?.addEventListener('click',()=>{window.open('admin.html','_blank');});
+    ?.addEventListener('click',(e)=>{
+      // × ボタン以外のクリックで admin.html を開く
+      if(!e.target.classList.contains('banner-close')){
+        window.open('admin.html','_blank');
+      }
+    });
 
   /* ゲーム画面 */
   document.getElementById('btn-home').addEventListener('click',()=>{
@@ -197,8 +264,14 @@ document.addEventListener('DOMContentLoaded',()=>{
   /* geminiStatusUpdate 監視 */
   window.addEventListener('geminiStatusUpdate',(e)=>{
     const status=e.detail;if(!status)return;
-    if(status.lastError)showErrorBanner(status.lastError,'error');
-    // 廃止モデル検出時はバナーだけ表示（admin.htmlへの誘導で対応）
+    if(status.lastError){
+      // alertType が設定されていればそちらを優先
+      const alertType=status.alertType||null;
+      const msg = alertType
+        ? _alertTypeToMessage(alertType)
+        : status.lastError;
+      showErrorBanner(msg, 'error');
+    }
   });
 
   /* デフォルトレベル選択 */
