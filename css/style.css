@@ -387,60 +387,62 @@ button:active { transform: scale(.95); }
 /* ========================================
    エラー・通知バナー（× 閉じボタン付き）
    v2.5 以降
-   ======================================== */
-
-.model-error-banner {
-  position: fixed;
-  top: 0; left: 0; right: 0;
-  padding: 8px 48px 8px 20px; /* 右側に × ボタン分の余白 */
-  font-size: 13px;
-  font-family: var(--font);
-  font-weight: 700;
-  text-align: center;
-  cursor: pointer;
-  z-index: 9999;
-  transition: background .3s;
-  line-height: 1.5;
-  display: flex;
+   エラー / 通知バナー（BUG-D 修正: banner-text / banner-close 追加）
+   ============================================================ */
+#model-error-banner {
+  display: none;               /* js で flex に切替 */
   align-items: center;
-  justify-content: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 9999;
+  padding: 0.6rem 1rem;
+  background: linear-gradient(90deg, #FF6B6B, #FF8E53);
+  color: #fff;
+  font-size: 0.85rem;
+  font-weight: 600;
+  box-shadow: 0 2px 8px rgba(0,0,0,.25);
 }
-.model-error-banner--error { background: #c62828; color: #fff; }
-.model-error-banner--error:hover { background: #b71c1c; }
-.model-error-banner--info  { background: #1565c0; color: #fff; }
-.model-error-banner--info:hover  { background: #0d47a1; }
 
-/* バナー本文テキスト */
-.banner-text { flex: 1; text-align: center; }
+/* バナー本文: クリックで admin.html へ */
+#model-error-banner .banner-text {
+  flex: 1;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
-/* × 閉じボタン */
-.banner-close {
-  position: absolute;
-  right: 12px;
-  top: 50%;
-  transform: translateY(-50%);
+/* × ボタン: クリックで閉じるだけ */
+#model-error-banner .banner-close {
+  flex-shrink: 0;
   background: none;
   border: none;
-  color: inherit;
-  font-size: 18px;
-  font-weight: 900;
+  color: #fff;
+  font-size: 1.2rem;
   line-height: 1;
   cursor: pointer;
-  padding: 4px 6px;
-  border-radius: 4px;
-  opacity: 0.75;
-  transition: opacity .15s, background .15s;
+  padding: 0 0.2rem;
+  opacity: 0.85;
+  transition: opacity 0.15s;
 }
-.banner-close:hover {
+#model-error-banner .banner-close:hover {
   opacity: 1;
-  background: rgba(255,255,255,.2);
 }
 
+/* スマートフォン対応 */
 @media (max-width: 600px) {
-  .model-error-banner { font-size: 11px; padding: 7px 40px 7px 12px; }
-  .banner-close { font-size: 16px; right: 8px; }
+  #model-error-banner {
+    font-size: 0.78rem;
+    padding: 0.5rem 0.75rem;
+  }
 }
-
 
 /* ===== Responsive — タブレット ===== */
 @media (min-width: 601px) and (max-width: 900px) {
