@@ -1,285 +1,278 @@
 /**
- * app.js  v2.5
- *
- * 【v2.5 変更点】
- *   - generateProblems の戻り値が { problems, validCount, alertType } オブジェクトに変更
- *     → AppState.problems への代入を .problems に変更
- *   - alertType に応じたバナーメッセージ切り替え
- *       'MODEL'  → "CHANGE AI model"
- *       'PROMPT' → "CHECK AI prompt or CHANGE AI model"
- *       'LEVEL'  → "CONSIDER changing the level limits"
- *   - バナーに × 閉じボタンを追加（バナー本文クリックは admin.html 遷移を維持）
- *   - geminiStatusUpdate リスナーのメッセージもアラート種別で分岐
- *
- * 【v2.4 以前の変更点（維持）】
- *   管理者AIモデル設定UIをすべて admin.html へ移管
- *   Promise.race によるタイムアウトガード (30s)
+ * app.js  v2.5.1
+ * 変更点:
+ *   - BUG-A: geminiStatusUpdate リスナーで alertType が null/undefined の場合は
+ *            hideErrorBanner() を呼び、前回バナーを必ずクリア
+ *   - BUG-D: showErrorBanner / hideErrorBanner を banner-text / banner-close 対応に修正
  */
 
+/* ============================================================
+   §0. AppState
+   ============================================================ */
 const AppState = {
-  level:        1,
-  problems:     [],
-  currentIndex: 0,
-  score:        0,
-  useAI:        false,
-  apiKey:       ''
+  level       : 0,
+  problems    : [],
+  currentIdx  : 0,
+  score       : 0,
+  useAI       : false,
+  apiKey      : ''
 };
 
-const PRAISE_LIST = [
-  'すごい！ぴったり！','かんぺき！！ 🎉','やったね！ばっちり！','さすが！！ てんさい！',
-  'せいかい！よくできました！','かっこいい！','おみごと！！ 🌟','すばらしい！！'
-];
-function randomPraise(){ return PRAISE_LIST[Math.floor(Math.random()*PRAISE_LIST.length)]; }
+const PRAISE_LIST = ['Great!', 'Perfect!', 'Excellent!', 'Amazing!', 'Brilliant!'];
 
-function showScreen(id){
-  document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
-  document.getElementById(id).classList.add('active');
+/* ============================================================
+   §1. アラートタイプ → バナーメッセージ
+   ============================================================ */
+const ALERT_MESSAGES = {
+  MODEL  : 'CHANGE AI model',
+  PROMPT : 'CHECK AI prompt or CHANGE AI model',
+  LEVEL  : 'CONSIDER changing the level limits'
+};
+
+/* ============================================================
+   §2. 画面切替
+   ============================================================ */
+function showScreen(id) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  const el = document.getElementById(id);
+  if (el) el.classList.add('active');
 }
 
-function judgeAnswer(problem,userLines){
-  const correct=problem.lines;
-  const hint=problem.hintLines||[];
-  const allUserLines=[...hint,...userLines];
-  if(allUserLines.length!==correct.length)return false;
-  const normalize=l=>[`${l.x1},${l.y1}-${l.x2},${l.y2}`,`${l.x2},${l.y2}-${l.x1},${l.y1}`].sort()[0];
-  const correctSet=new Set(correct.map(normalize));
-  for(const line of allUserLines){if(!correctSet.has(normalize(line)))return false;}
-  const userSet=new Set(allUserLines.map(normalize));
-  return userSet.size===correctSet.size;
+/* ============================================================
+   §3. バナー（BUG-A・BUG-D 修正）
+   ============================================================ */
+/**
+ * BUG-D 修正:
+ *   banner-text（クリックで admin.html 遷移）と
+ *   banner-close（× クリックで閉じるだけ）を適切にセット
+ */
+function showErrorBanner(alertType, customMsg) {
+  const banner    = document.getElementById('model-error-banner');
+  if (!banner) return;
+
+  const msg       = customMsg || ALERT_MESSAGES[alertType] || alertType || 'AI error';
+  const textEl    = banner.querySelector('.banner-text');
+  const closeBtn  = banner.querySelector('.banner-close');
+
+  if (textEl)   textEl.textContent = `⚠️ ${msg} → tap to configure`;
+  if (closeBtn) closeBtn.setAttribute('aria-label', 'Close alert');
+
+  banner.dataset.alertType = alertType || '';
+  banner.style.display     = 'flex';
 }
 
-function updateProgress(){
-  const total=AppState.problems.length;const cur=AppState.currentIndex+1;
-  document.getElementById('progress-text').textContent=`${cur} / ${total}もん`;
-  document.getElementById('progress-bar').style.width=`${(cur/total)*100}%`;
-  document.getElementById('score-text').textContent=`⭐ ${AppState.score}`;
-}
-
-function updateHintMsg(problem){
-  const hintEl=document.getElementById('hint-msg');
-  if(problem.level!==0&&problem.level!==1){hintEl.classList.add('hidden');return;}
-  const remain=problem.lines.length-(problem.hintLines||[]).length;
-  document.getElementById('hint-remain').textContent=remain;
-  hintEl.classList.remove('hidden');
-}
-
-function _refreshOverlayLimit(problem,lineCount){
-  const ov=document.getElementById('canvas-overlay');if(!ov)return;
-  if(problem.level!==0&&problem.level!==1){ov.style.pointerEvents='auto';ov.style.cursor='crosshair';return;}
-  const maxLines=problem.lines.length-(problem.hintLines||[]).length;
-  if(lineCount>=maxLines){ov.style.pointerEvents='none';ov.style.cursor='not-allowed';}
-  else{ov.style.pointerEvents='auto';ov.style.cursor='crosshair';}
-}
-
-function loadQuestion(index){
-  const problem=AppState.problems[index];AppState.currentIndex=index;
-  updateProgress();initCanvases(problem);updateHintMsg(problem);buildGridHeaders(problem);
-  requestAnimationFrame(()=>{requestAnimationFrame(()=>{
-    drawModel(problem);drawAnswer(problem);
-    setupInteraction(problem,(lineCount)=>{_refreshOverlayLimit(problem,lineCount);});
-    _refreshOverlayLimit(problem,0);
-  });});
-}
-
-function checkAnswer(){
-  const problem=AppState.problems[AppState.currentIndex];
-  const userLines=getAnswerLines();const isCorrect=judgeAnswer(problem,userLines);
-  document.getElementById('feedback-overlay').classList.remove('hidden');
-  if(isCorrect){
-    AppState.score++;document.getElementById('score-text').textContent=`⭐ ${AppState.score}`;
-    document.getElementById('feedback-wrong').classList.add('hidden');
-    document.getElementById('feedback-correct').classList.remove('hidden');
-    document.getElementById('praise-text').textContent=randomPraise();
-    const img=document.querySelector('.gotit-img');img.style.animation='none';img.offsetHeight;img.style.animation='';
-  }else{
-    document.getElementById('feedback-correct').classList.add('hidden');
-    document.getElementById('feedback-wrong').classList.remove('hidden');
-    drawWrongFeedback(problem,userLines);
+function hideErrorBanner() {
+  const banner = document.getElementById('model-error-banner');
+  if (banner) {
+    banner.style.display     = 'none';
+    banner.dataset.alertType = '';
   }
 }
 
-function goNext(){
-  document.getElementById('feedback-overlay').classList.add('hidden');
-  const next=AppState.currentIndex+1;
-  if(next>=AppState.problems.length)showResult();else loadQuestion(next);
+/* ============================================================
+   §4. 判定・進行ユーティリティ
+   ============================================================ */
+function judgeAnswer(answerLines, problem) {
+  if (!problem || !Array.isArray(problem.lines)) return false;
+  if (answerLines.length !== problem.lines.length) return false;
+  const normalize = l =>
+    `${Math.min(l.x1,l.x2)},${Math.min(l.y1,l.y2)},${Math.max(l.x1,l.x2)},${Math.max(l.y1,l.y2)}`;
+  const aSet = new Set(answerLines.map(normalize));
+  return problem.lines.every(l => aSet.has(normalize(l)));
 }
 
-function showResult(){
+function updateProgress() {
+  const el = document.getElementById('progress-text');
+  if (el) el.textContent = `${AppState.currentIdx + 1} / ${AppState.problems.length}`;
+}
+
+function updateHintMsg(problem) {
+  const cfg = (window.LEVEL_CFG || [])[AppState.level];
+  const el  = document.getElementById('hint-msg');
+  if (!el || !cfg) return;
+  el.textContent = `lines: ${cfg.lines}  |  hints: ${cfg.hints}`;
+}
+
+function _refreshOverlayLimit() {
+  const el = document.getElementById('overlay-limit');
+  if (el) el.textContent = AppState.problems.length;
+}
+
+/* ============================================================
+   §5. 問題読み込み / チェック / 次へ
+   ============================================================ */
+function loadQuestion() {
+  const prob = AppState.problems[AppState.currentIdx];
+  if (!prob) return;
+  if (window.drawModel)  window.drawModel(prob);
+  if (window.clearAnswerLines) window.clearAnswerLines();
+  updateProgress();
+  updateHintMsg(prob);
+}
+
+function checkAnswer() {
+  const lines = window.getAnswerLines ? window.getAnswerLines() : [];
+  const prob  = AppState.problems[AppState.currentIdx];
+  if (judgeAnswer(lines, prob)) {
+    AppState.score++;
+    document.getElementById('score-val').textContent = AppState.score;
+    const el = document.getElementById('feedback-correct');
+    if (el) { el.style.display = 'flex'; setTimeout(() => { el.style.display = 'none'; goNext(); }, 900); }
+  } else {
+    if (window.drawWrongFeedback) window.drawWrongFeedback();
+    const el = document.getElementById('feedback-wrong');
+    if (el) { el.style.display = 'flex'; setTimeout(() => el.style.display = 'none', 700); }
+  }
+}
+
+function goNext() {
+  AppState.currentIdx++;
+  if (AppState.currentIdx >= AppState.problems.length) {
+    showResult();
+  } else {
+    loadQuestion();
+  }
+}
+
+function showResult() {
+  document.getElementById('result-score').textContent =
+    `${AppState.score} / ${AppState.problems.length}`;
   showScreen('screen-result');
-  const score=AppState.score;const total=AppState.problems.length;
-  document.getElementById('final-score').textContent=score;
-  let msg='';
-  if(score===total)msg='ぜんぶせいかい！！ あなたはてんさい！🎉';
-  else if(score>=total*0.8)msg='とてもよくできました！';
-  else if(score>=total*0.6)msg='よくがんばりました！';
-  else msg='がんばった！またあそぼう！！';
-  document.getElementById('result-msg').textContent=msg;
 }
 
-/* ====================================================================
-   バナー表示（× ボタン付き）
-==================================================================== */
+/* ============================================================
+   §6. ローディング
+   ============================================================ */
+function showLoading(visible) {
+  const el = document.getElementById('loading-overlay');
+  if (el) el.style.display = visible ? 'flex' : 'none';
+}
 
-/**
- * 【v2.5】showErrorBanner
- * バナー本文クリック → admin.html を別タブで開く
- * × ボタンクリック  → バナーを閉じるのみ（admin.html は開かない）
- */
-function showErrorBanner(message, type='error'){
-  const banner = document.getElementById('model-error-banner');
-  if(!banner) return;
+/* ============================================================
+   §7. ゲーム開始
+   ============================================================ */
+async function startGame() {
+  AppState.score      = 0;
+  AppState.currentIdx = 0;
 
-  // バナー内を再構築（本文スパン + ×ボタン）
-  banner.innerHTML = '';
+  const apiKey = GeminiAPI.loadApiKey();
+  AppState.useAI  = !!apiKey;
+  AppState.apiKey = apiKey;
 
-  const textSpan = document.createElement('span');
-  textSpan.className = 'banner-text';
-  textSpan.textContent = type === 'error'
-    ? `⚠️ AI: ${message}`
-    : `💡 ${message}`;
+  if (!AppState.useAI) {
+    AppState.problems = (window.LOCAL_PROBLEMS || [])[AppState.level] || [];
+    showScreen('screen-game');
+    loadQuestion();
+    _refreshOverlayLimit();
+    return;
+  }
 
-  const closeBtn = document.createElement('button');
-  closeBtn.className   = 'banner-close';
-  closeBtn.textContent = '×';
-  closeBtn.setAttribute('aria-label', '閉じる');
-  // × ボタン: バナーを閉じるだけ（admin.html は開かない）
-  closeBtn.addEventListener('click', (e) => {
-    e.stopPropagation(); // バナー本文のクリックイベントを発火させない
+  showLoading(true);
+  try {
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('Timeout: AI generation took too long')), 30000)
+    );
+
+    const result = await Promise.race([
+      GeminiAPI.generateProblems(AppState.level),
+      timeoutPromise
+    ]);
+
+    AppState.problems = result.problems;
+
+    // BUG-A 修正: alertType が null/falsy の場合は必ずバナーを閉じる
+    if (result.alertType) {
+      showErrorBanner(result.alertType);
+    } else {
+      hideErrorBanner();
+    }
+
+  } catch (err) {
+    AppState.problems = (window.LOCAL_PROBLEMS || [])[AppState.level] || [];
+    showErrorBanner('MODEL', err.message);
+  } finally {
+    showLoading(false);
+  }
+
+  showScreen('screen-game');
+  loadQuestion();
+  _refreshOverlayLimit();
+}
+
+/* ============================================================
+   §8. イベントバインド
+   ============================================================ */
+document.addEventListener('DOMContentLoaded', () => {
+
+  // レベル選択
+  document.querySelectorAll('[data-level]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('[data-level]').forEach(b => b.classList.remove('selected'));
+      btn.classList.add('selected');
+      AppState.level = parseInt(btn.dataset.level, 10);
+    });
+  });
+  // デフォルトレベル
+  const defaultBtn = document.querySelector('[data-level="0"]');
+  if (defaultBtn) defaultBtn.click();
+
+  // スタートボタン
+  document.getElementById('btn-start')?.addEventListener('click', startGame);
+
+  // API キーパネル
+  document.getElementById('btn-toggle-api')?.addEventListener('click', () => {
+    const panel = document.getElementById('api-key-panel');
+    if (panel) panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+  });
+  document.getElementById('btn-save-api')?.addEventListener('click', () => {
+    const val = document.getElementById('input-api-key')?.value?.trim();
+    if (val) {
+      GeminiAPI.saveApiKey(val);
+      document.getElementById('api-key-panel').style.display = 'none';
+    }
+  });
+
+  // 管理画面リンク
+  document.getElementById('btn-admin-model')?.addEventListener('click', () => {
+    window.open('admin.html', '_blank');
+  });
+
+  // ゲームコントロール
+  document.getElementById('btn-home')?.addEventListener('click', () => showScreen('screen-start'));
+  document.getElementById('btn-clear')?.addEventListener('click', () => { if (window.clearAnswerLines) window.clearAnswerLines(); });
+  document.getElementById('btn-undo')?.addEventListener('click',  () => { if (window.undoLastLine) window.undoLastLine(); });
+  document.getElementById('btn-check')?.addEventListener('click', checkAnswer);
+  document.getElementById('btn-next')?.addEventListener('click',  goNext);
+
+  // リザルト画面
+  document.getElementById('btn-retry')?.addEventListener('click', startGame);
+  document.getElementById('btn-result-home')?.addEventListener('click', () => showScreen('screen-start'));
+
+  // BUG-D 修正: バナーの × ボタン（閉じるだけ）
+  document.querySelector('#model-error-banner .banner-close')?.addEventListener('click', (e) => {
+    e.stopPropagation();
     hideErrorBanner();
   });
-
-  banner.appendChild(textSpan);
-  banner.appendChild(closeBtn);
-  banner.className = `model-error-banner model-error-banner--${type}`;
-  banner.classList.remove('hidden');
-}
-
-function hideErrorBanner(){
-  const banner = document.getElementById('model-error-banner');
-  if(banner) banner.classList.add('hidden');
-}
-
-/* ====================================================================
-   【v2.5】alertType → バナーメッセージ変換
-==================================================================== */
-function _alertTypeToMessage(alertType, fallbackMsg){
-  switch(alertType){
-    case 'MODEL':  return 'CHANGE AI model';
-    case 'PROMPT': return 'CHECK AI prompt or CHANGE AI model';
-    case 'LEVEL':  return 'CONSIDER changing the level limits';
-    default:       return fallbackMsg || alertType || 'AI error occurred';
-  }
-}
-
-/* ====================================================================
-   startGame
-==================================================================== */
-async function startGame(){
-  const level=AppState.level;const apiKey=AppState.apiKey;
-  if(apiKey){
-    showLoading(true);
-    try{
-      const timeoutPromise=new Promise((_,reject)=>setTimeout(()=>reject(new Error('タイムアウト')),30000));
-      // 【v2.5】generateProblems の戻り値が { problems, validCount, alertType } に変更
-      const result = await Promise.race([generateProblems(level,5,apiKey), timeoutPromise]);
-      AppState.problems = result.problems;
-
-      // alertType が設定されていればバナー表示
-      if(result.alertType){
-        showErrorBanner(_alertTypeToMessage(result.alertType), 'error');
-      }
-    }catch(e){
-      console.warn('AI生成失敗:',e.message);
-      AppState.problems=getProblems(level);
-    }
-    finally{showLoading(false);}
-  }else{
-    AppState.problems=getProblems(level);
-  }
-  AppState.score=0;AppState.currentIndex=0;
-  showScreen('screen-game');
-  requestAnimationFrame(()=>{requestAnimationFrame(()=>{loadQuestion(0);});});
-}
-
-function showLoading(show){document.getElementById('loading-overlay').classList.toggle('hidden',!show);}
-
-/* ── イベントバインド ── */
-document.addEventListener('DOMContentLoaded',()=>{
-
-  /* スタート画面 */
-  document.querySelectorAll('.level-btn').forEach(btn=>{
-    btn.addEventListener('click',()=>{
-      document.querySelectorAll('.level-btn').forEach(b=>b.classList.remove('selected'));
-      btn.classList.add('selected');AppState.level=parseInt(btn.dataset.level,10);
-      document.getElementById('btn-start').disabled=false;
-    });
+  // バナー本文クリック → admin.html
+  document.querySelector('#model-error-banner .banner-text')?.addEventListener('click', () => {
+    window.open('admin.html', '_blank');
   });
-  document.getElementById('btn-start').addEventListener('click',startGame);
 
-  document.getElementById('btn-toggle-api').addEventListener('click',()=>{
-    document.getElementById('api-key-panel').classList.toggle('hidden');
-  });
-  document.getElementById('btn-save-api').addEventListener('click',()=>{
-    const key=document.getElementById('input-api-key').value.trim();
-    if(key){
-      saveApiKey(key);AppState.apiKey=key;clearModelCache();
-      alert('APIキーを保存しました。');
-      if(!loadAdminChain())showErrorBanner('AIモデルが未設定です。管理者設定から推奨モデルを選んでください。','info');
-    }else{saveApiKey('');AppState.apiKey='';clearModelCache();hideErrorBanner();alert('APIキーをクリアしました。');}
-  });
-  const savedKey=loadApiKey();
-  if(savedKey){AppState.apiKey=savedKey;document.getElementById('input-api-key').value=savedKey;}
-
-  /* admin.html リンク: バナー本文クリック */
-  document.getElementById('btn-admin-model')
-    ?.addEventListener('click',()=>{window.open('admin.html','_blank');});
-  document.getElementById('model-error-banner')
-    ?.addEventListener('click',(e)=>{
-      // × ボタン以外のクリックで admin.html を開く
-      if(!e.target.classList.contains('banner-close')){
-        window.open('admin.html','_blank');
-      }
-    });
-
-  /* ゲーム画面 */
-  document.getElementById('btn-home').addEventListener('click',()=>{
-    if(confirm('ホームに戻りますか？'))showScreen('screen-start');
-  });
-  document.getElementById('btn-clear').addEventListener('click',()=>{
-    clearAnswerLines();const problem=AppState.problems[AppState.currentIndex];
-    if(problem)_refreshOverlayLimit(problem,0);
-  });
-  document.getElementById('btn-undo').addEventListener('click',()=>{
-    undoLastLine();const problem=AppState.problems[AppState.currentIndex];
-    const lineCount=getAnswerLines().length;if(problem)_refreshOverlayLimit(problem,lineCount);
-  });
-  document.getElementById('btn-check').addEventListener('click',checkAnswer);
-  document.getElementById('btn-next-wrong').addEventListener('click',goNext);
-  document.getElementById('btn-next-correct').addEventListener('click',goNext);
-
-  /* 結果画面 */
-  document.getElementById('btn-retry').addEventListener('click',startGame);
-  document.getElementById('btn-result-home').addEventListener('click',()=>showScreen('screen-start'));
-
-  /* geminiStatusUpdate 監視 */
-  window.addEventListener('geminiStatusUpdate',(e)=>{
-    const status=e.detail;if(!status)return;
-    if(status.lastError){
-      // alertType が設定されていればそちらを優先
-      const alertType=status.alertType||null;
-      const msg = alertType
-        ? _alertTypeToMessage(alertType)
-        : status.lastError;
-      showErrorBanner(msg, 'error');
+  // geminiStatusUpdate リスナー（BUG-A 修正）
+  window.addEventListener('geminiStatusUpdate', (e) => {
+    const status = e.detail || {};
+    // alertType が null / undefined / 空文字の場合はバナーを閉じる
+    if (status.alertType) {
+      showErrorBanner(status.alertType);
+    } else {
+      hideErrorBanner();
     }
   });
 
-  /* デフォルトレベル選択 */
-  const defaultLvBtn=document.querySelector('.level-btn[data-level="1"]');
-  if(defaultLvBtn){defaultLvBtn.classList.add('selected');AppState.level=1;document.getElementById('btn-start').disabled=false;}
-
-  /* 初回案内バナー */
-  if(AppState.apiKey&&!loadAdminChain()){
-    setTimeout(()=>showErrorBanner('AIモデルが未設定です。管理者設定から推奨モデルを選んでください。','info'),600);
+  // 初回起動: API キーあり・チェーン未設定 → info バナー
+  const hasKey   = !!GeminiAPI.loadApiKey();
+  const hasChain = !!GeminiAPI.loadAdminChain();
+  if (hasKey && !hasChain) {
+    showErrorBanner('INFO', 'Recommended: configure AI models in admin panel');
   }
 });
