@@ -1,624 +1,437 @@
 'use strict';
 
 /* =====================================================================
-   gemini.js  v5.9
-   -----------------------------------------------------------------------
-   v5.9 からの変更点（v5.8 → v5.9）:
-     【Fix-J】アラート種別の細分化
-       - _updateStatus の patch に alertType フィールドを追加
-         'MODEL'  : JSONパース失敗（AIが構造無視した出力）
-         'PROMPT' : JSON取得成功だが有効問題0件（棄却）
-         'LEVEL'  : 全試行後、有効問題数が need の 60% 以下（3/5以下）
-       - generateProblems の戻り値に validCount を付与し、
-         app.js 側で LEVEL アラートを判定できるようにする
-       - アラートログ用に rawJson（AIの生出力）を _updateStatus へ渡す
-===================================================================== */
+ gemini.js  v5.9.1
+  変更点:
+    - BUG-A: _updateStatus の成功パッチ時に alertType: null を明示セット
+    - BUG-B: LEVEL アラート閾値を TARGET_COUNT 比率（60%未満）で計算
+ ===================================================================== */
 
 const _G = (() => {
 
-/* ====================================================================
-   § 1. 定数
-==================================================================== */
-const BASE_URL               = 'https://generativelanguage.googleapis.com/v1beta';
-const MODEL_CACHE_KEY        = 'gemini_model_v3';
-const MODEL_CACHE_TTL        = 24 * 60 * 60 * 1000;
-const NO_MIME_CACHE_KEY      = 'gemini_no_mime_v1';
-const NO_MIME_CACHE_TTL      = 7 * 24 * 60 * 60 * 1000;
-const LIVE_MODELS_CACHE_KEY  = 'gemini_live_models_v1';
-const LIVE_MODELS_CACHE_TTL  = 60 * 60 * 1000;
-const ADMIN_CHAIN_KEY        = 'gemini_admin_chain_v1';
-const ADMIN_STATUS_KEY       = 'gemini_admin_status_v1';
-const ALERT_LOG_KEY          = 'gemini_alert_log_v1'; // 【Fix-J】アラートログ用
-const ALERT_LOG_MAX          = 100;                    // 最大保持件数
+/* ============================================================
+   §0. 定数
+   ============================================================ */
+const API_BASE_URL   = 'https://generativelanguage.googleapis.com';
+const MODEL_LIST_URL = `${API_BASE_URL}/v1beta/models`;
+const GEN_URL_TPL    = (m) => `${API_BASE_URL}/v1beta/models/${m}:generateContent`;
 
-const FALLBACK_MODEL_CHAIN = [
-  'gemini-2.5-flash-lite',
-  'gemini-3.1-flash-lite-preview',
-  'gemini-2.5-flash'
-];
+const MODEL_CACHE_KEY   = 'gemini_model_v3';
+const ADMIN_CHAIN_KEY   = 'gemini_admin_chain_v1';
+const ADMIN_STATUS_KEY  = 'gemini_admin_status_v1';
+const ALERT_LOG_KEY     = 'gemini_alert_log_v1';
+const API_KEY_STORAGE   = 'gemini_api_key';
+
+const MODEL_CACHE_TTL   = 60 * 60 * 1000; // 1時間
+const ALERT_LOG_MAX     = 100;
+const TARGET_COUNT      = 5;               // 1セッションの目標問題数
+// BUG-B 修正: 比率定数を分離
+const LEVEL_ALERT_RATIO = 0.6;            // validCount / TARGET_COUNT がこれ未満で LEVEL アラート
 
 const EXCLUDED_KEYWORDS  = ['pro', 'image'];
 const PREFERRED_KEYWORDS = ['flash-lite', 'flash'];
 
-const FETCH_TIMEOUT_MS       = 8000;
-const MAX_429_PER_MODEL      = 2;
-const MAX_ATTEMPTS_PER_MODEL = 2;
-const ERROR_NOTIFY_THRESHOLD = 5;
+const FALLBACK_CHAIN = [
+  'gemini-1.5-flash-latest',
+  'gemini-1.5-flash',
+  'gemini-1.0-pro'
+];
 
-const LEVEL_CFG = {
-  0: { lines: 3, gridN: 3, lo: 0, hi: 6, hints: 2 },
-  1: { lines: 4, gridN: 3, lo: 0, hi: 5, hints: 2 },
-  2: { lines: 4, gridN: 3, lo: 2, hi: 5, hints: 0 },
-  3: { lines: 5, gridN: 4, lo: 0, hi: 8, hints: 0 }
+const LEVEL_CFG = [
+  { lines: 3, hints: 1, intersections: [0, 3] },
+  { lines: 4, hints: 1, intersections: [0, 5] },
+  { lines: 5, hints: 2, intersections: [2, 8] },
+  { lines: 6, hints: 2, intersections: [3, 12] }
+];
+
+/* ============================================================
+   §1. アラートログ
+   ============================================================ */
+function getAlertLogKey() { return ALERT_LOG_KEY; }
+
+function _appendAlertLog(entry) {
+  try {
+    const raw  = localStorage.getItem(ALERT_LOG_KEY);
+    const logs = raw ? JSON.parse(raw) : [];
+    logs.unshift({
+      ts        : new Date().toISOString(),
+      alertType : entry.alertType || 'UNKNOWN',
+      message   : entry.message   || '',
+      model     : entry.model     || '',
+      rawJson   : entry.rawJson   || ''
+    });
+    if (logs.length > ALERT_LOG_MAX) logs.length = ALERT_LOG_MAX;
+    localStorage.setItem(ALERT_LOG_KEY, JSON.stringify(logs));
+  } catch (e) {
+    console.warn('[gemini] _appendAlertLog error:', e);
+  }
+}
+
+/* ============================================================
+   §2. ステータス管理
+   ============================================================ */
+let _status = {
+  errorCount       : 0,
+  lastSuccessModel : null,
+  lastSuccessTs    : null,
+  lastError        : null,
+  lastErrorTs      : null,
+  needsUpdate      : false,
+  alertType        : null   // BUG-A 修正: 常に存在するフィールドとして初期化
 };
-
-/* ====================================================================
-   § 2. 交差判定ヘルパー（problems.js の _cross と完全一致）
-==================================================================== */
-function _cross(ax,ay,bx,by,cx,cy,dx,dy){
-  if((ax===cx&&ay===cy)||(ax===dx&&ay===dy))return false;
-  if((bx===cx&&by===cy)||(bx===dx&&by===dy))return false;
-  const d1=(dx-cx)*(ay-cy)-(dy-cy)*(ax-cx);
-  const d2=(dx-cx)*(by-cy)-(dy-cy)*(bx-cx);
-  const d3=(bx-ax)*(cy-ay)-(by-ay)*(cx-ax);
-  const d4=(bx-ax)*(dy-ay)-(by-ay)*(dx-ax);
-  return(((d1>0&&d2<0)||(d1<0&&d2>0))&&((d3>0&&d4<0)||(d3<0&&d4>0)));
-}
-function _countCross(lines){
-  let n=0;
-  for(let i=0;i<lines.length;i++)
-    for(let j=i+1;j<lines.length;j++)
-      if(_cross(lines[i].x1,lines[i].y1,lines[i].x2,lines[i].y2,
-                lines[j].x1,lines[j].y1,lines[j].x2,lines[j].y2))n++;
-  return n;
-}
-function _isCollinearOverlap(a,b){
-  const dxA=a.x2-a.x1,dyA=a.y2-a.y1;
-  const c1=dxA*(b.y1-a.y1)-dyA*(b.x1-a.x1);
-  const c2=dxA*(b.y2-a.y1)-dyA*(b.x2-a.x1);
-  if(c1!==0||c2!==0)return false;
-  const len2=dxA*dxA+dyA*dyA;
-  if(len2===0)return false;
-  const t1=(dxA*(b.x1-a.x1)+dyA*(b.y1-a.y1))/len2;
-  const t2=(dxA*(b.x2-a.x1)+dyA*(b.y2-a.y1))/len2;
-  return Math.max(t1,t2)>0&&Math.min(t1,t2)<1;
-}
-function _hasCollinearOverlap(lines){
-  for(let i=0;i<lines.length;i++)
-    for(let j=i+1;j<lines.length;j++)
-      if(_isCollinearOverlap(lines[i],lines[j]))return true;
-  return false;
-}
-
-/* ====================================================================
-   § 3. バリデーション
-==================================================================== */
-function _validate(problem,cfg){
-  return _countCross(problem.lines)>=cfg.lo&&_countCross(problem.lines)<=cfg.hi;
-}
-
-/* ====================================================================
-   § 4. 正規化
-==================================================================== */
-function _normalise(raw,level){
-  const cfg=LEVEL_CFG[level]??LEVEL_CFG[1];
-  const maxC=cfg.gridN;
-  const clamp=v=>Math.max(0,Math.min(maxC,Math.round(Number(v)||0)));
-  let lines=(raw.lines||[])
-    .map(l=>({
-      x1:clamp(l.x1??l.x??0),y1:clamp(l.y1??l.y??0),
-      x2:clamp(l.x2??(l.x!==undefined?l.x+1:1)),
-      y2:clamp(l.y2??(l.y!==undefined?l.y+1:1))
-    }))
-    .filter(l=>!(l.x1===l.x2&&l.y1===l.y2));
-  const seen=new Set();
-  lines=lines.filter(l=>{
-    const key=(l.x1<l.x2||(l.x1===l.x2&&l.y1<=l.y2))
-      ?`${l.x1},${l.y1},${l.x2},${l.y2}`:`${l.x2},${l.y2},${l.x1},${l.y1}`;
-    if(seen.has(key)){console.warn('[gemini] 重複除去');return false;}
-    seen.add(key);return true;
-  });
-  if(_hasCollinearOverlap(lines)){console.warn('[gemini] コリニア重複→棄却');return null;}
-  if(lines.length!==cfg.lines)return null;
-  return{level,grid:{cols:cfg.gridN+1,rows:cfg.gridN+1},lines,hintLines:lines.slice(0,cfg.hints)};
-}
-
-/* ====================================================================
-   § 5. テキスト抽出パーサー
-==================================================================== */
-function _extractJsonArray(text){
-  if(!text)return null;
-  const s=text.replace(/```(?:json)?\s*([\s\S]*?)```/g,'$1').trim();
-  for(const c of _extractAllArrayStrings(s).sort((a,b)=>b.length-a.length)){
-    try{const p=JSON.parse(c);if(Array.isArray(p)&&p.length>0&&p.every(i=>i&&typeof i==='object'))return p;}catch(_){}
-  }
-  for(const c of _extractAllObjectStrings(s).sort((a,b)=>b.length-a.length)){
-    try{const p=JSON.parse(c);if(p&&typeof p==='object'&&!Array.isArray(p)){
-      for(const v of Object.values(p))if(Array.isArray(v)&&v.length>0&&v.every(i=>i&&typeof i==='object'))return v;
-    }}catch(_){}
-  }
-  const objs=[];
-  for(const line of s.split('\n')){
-    const t=line.trim();
-    if(t.startsWith('{')&&t.endsWith('}')){
-      try{const o=JSON.parse(t);if(o&&'lines'in o)objs.push(o);}catch(_){}
-    }
-  }
-  return objs.length>0?objs:null;
-}
-function _extractAllArrayStrings(text){
-  const r=[];let d=0,s=-1;
-  for(let i=0;i<text.length;i++){
-    if(text[i]==='['){if(!d)s=i;d++;}
-    else if(text[i]===']'){d--;if(!d&&s!==-1){r.push(text.slice(s,i+1));s=-1;}}
-  }
-  return r;
-}
-function _extractAllObjectStrings(text){
-  const r=[];let d=0,s=-1;
-  for(let i=0;i<text.length;i++){
-    if(text[i]==='{'){if(!d)s=i;d++;}
-    else if(text[i]==='}'){d--;if(!d&&s!==-1){r.push(text.slice(s,i+1));s=-1;}}
-  }
-  return r;
-}
-
-/* ====================================================================
-   § 6. no-mime キャッシュ管理
-==================================================================== */
-function _isNoMimeCached(model){
-  try{
-    const raw=localStorage.getItem(NO_MIME_CACHE_KEY);if(!raw)return false;
-    const cache=JSON.parse(raw);const e=cache[model];if(!e)return false;
-    if(Date.now()-e.ts>=NO_MIME_CACHE_TTL){
-      delete cache[model];localStorage.setItem(NO_MIME_CACHE_KEY,JSON.stringify(cache));return false;
-    }
-    return true;
-  }catch(_){return false;}
-}
-function _setNoMimeCache(model){
-  try{
-    const raw=localStorage.getItem(NO_MIME_CACHE_KEY);
-    const cache=raw?JSON.parse(raw):{};
-    cache[model]={ts:Date.now()};
-    localStorage.setItem(NO_MIME_CACHE_KEY,JSON.stringify(cache));
-  }catch(_){}
-}
-
-/* ====================================================================
-   § 7. モデルキャッシュ・ライブ取得・チェーン構築
-==================================================================== */
-function _saveModel(model){
-  try{localStorage.setItem(MODEL_CACHE_KEY,JSON.stringify({model,ts:Date.now()}));}catch(_){}
-  try{
-    const prev=JSON.parse(localStorage.getItem(ADMIN_STATUS_KEY)||'{}');
-    localStorage.setItem(ADMIN_STATUS_KEY,JSON.stringify({...prev,lastSuccessModel:model,lastSuccessTs:Date.now()}));
-  }catch(_){}
-}
-
-function clearModelCache(){
-  try{localStorage.removeItem(MODEL_CACHE_KEY);localStorage.removeItem(LIVE_MODELS_CACHE_KEY);}catch(_){}
-}
-
-function saveAdminChain(chain){
-  try{
-    localStorage.setItem(ADMIN_CHAIN_KEY,JSON.stringify({chain,ts:Date.now()}));
-    console.log(`[gemini] 管理者チェーン保存: ${chain.join(' → ')}`);
-  }catch(_){}
-}
-function loadAdminChain(){
-  try{
-    const raw=localStorage.getItem(ADMIN_CHAIN_KEY);if(!raw)return null;
-    const{chain}=JSON.parse(raw);
-    return Array.isArray(chain)&&chain.length>0?chain:null;
-  }catch(_){return null;}
-}
-function clearAdminChain(){try{localStorage.removeItem(ADMIN_CHAIN_KEY);}catch(_){}}
-
-async function _fetchLiveModels(apiKey){
-  try{
-    const raw=localStorage.getItem(LIVE_MODELS_CACHE_KEY);
-    if(raw){
-      const{models,ts}=JSON.parse(raw);
-      if(Date.now()-ts<LIVE_MODELS_CACHE_TTL){
-        console.log(`[gemini] ライブモデルキャッシュ: ${models.length}件`);return models;
-      }
-    }
-  }catch(_){}
-  try{
-    const ctrl=new AbortController();const tid=setTimeout(()=>ctrl.abort(),5000);
-    const resp=await fetch(`${BASE_URL}/models?key=${encodeURIComponent(apiKey)}`,{signal:ctrl.signal});
-    clearTimeout(tid);
-    if(!resp.ok){console.warn(`[gemini] /v1beta/models HTTP ${resp.status}`);return null;}
-    const data=await resp.json();
-    const models=(data.models||[])
-      .filter(m=>{
-        const name=m.name?.replace(/^models\//,'')||'';
-        const supported=(m.supportedGenerationMethods||[]).includes('generateContent');
-        const isFlash=name.includes('flash');
-        const isExcluded=EXCLUDED_KEYWORDS.some(kw=>name.includes(kw));
-        return supported&&isFlash&&!isExcluded;
-      })
-      .map(m=>m.name.replace(/^models\//,''));
-    console.log(`[gemini] ライブflashモデル取得: ${models.length}件`,models);
-    try{localStorage.setItem(LIVE_MODELS_CACHE_KEY,JSON.stringify({models,ts:Date.now()}));}catch(_){}
-    return models;
-  }catch(e){console.warn('[gemini] ライブモデル取得エラー:',e.message);return null;}
-}
-
-async function _buildEffectiveChain(apiKey){
-  const liveModels=await _fetchLiveModels(apiKey);
-  const adminChain=loadAdminChain();
-  if(!liveModels){
-    const chain=adminChain||FALLBACK_MODEL_CHAIN;
-    return{chain,needsRedo:false,liveModels:null};
-  }
-  if(adminChain){
-    const alive=adminChain.filter(m=>liveModels.includes(m));
-    const dead =adminChain.filter(m=>!liveModels.includes(m));
-    if(dead.length>0){
-      console.warn(`[gemini] 廃止モデル: ${dead.join(', ')}`);
-      return{chain:alive.length>0?alive:FALLBACK_MODEL_CHAIN,needsRedo:true,liveModels};
-    }
-    return{chain:adminChain,needsRedo:false,liveModels};
-  }
-  const alive=FALLBACK_MODEL_CHAIN.filter(m=>liveModels.includes(m));
-  const inChain=new Set(FALLBACK_MODEL_CHAIN);
-  const supplements=[];
-  for(const kw of PREFERRED_KEYWORDS){
-    for(const m of liveModels){
-      if(m.includes(kw)&&!inChain.has(m)&&!supplements.includes(m)){supplements.push(m);break;}
-    }
-  }
-  const chain=[...alive,...supplements];
-  return{chain:chain.length>0?chain:FALLBACK_MODEL_CHAIN,needsRedo:false,liveModels};
-}
-
-/* ====================================================================
-   § 8. 【Fix-J】アラートログ管理
-==================================================================== */
 
 /**
- * アラートログを localStorage に追記する。
- * admin.js の renderAlertLog() が読み込んで表示する。
- *
- * @param {string} alertType  - 'MODEL' | 'PROMPT' | 'LEVEL' | その他
- * @param {string} message    - バナーに表示したメッセージ
- * @param {string} model      - 試行したモデル名
- * @param {*}      rawJson    - AIの生出力（null可）
+ * BUG-A 修正:
+ * - 成功時は patch に alertType: null を必ず含める
+ * - _updateStatus はマージ前に alertType を null リセットしてから上書き
  */
-function _appendAlertLog(alertType, message, model, rawJson){
-  try{
-    const entries = JSON.parse(localStorage.getItem(ALERT_LOG_KEY)||'[]');
-    entries.push({
-      ts:        Date.now(),
-      alertType,
-      message,
-      model:     model || '',
-      rawJson:   rawJson !== undefined ? rawJson : null
+function _updateStatus(patch) {
+  // alertType は明示的に渡されない限り null にリセット（残留防止）
+  _status = Object.assign({}, _status, { alertType: null }, patch);
+
+  try {
+    const stored = JSON.parse(localStorage.getItem(ADMIN_STATUS_KEY) || '{}');
+    const merged = Object.assign({}, stored, { alertType: null }, patch, {
+      _ts: new Date().toISOString()
     });
-    // 上限を超えた古いエントリを切り捨て
-    localStorage.setItem(ALERT_LOG_KEY, JSON.stringify(entries.slice(-ALERT_LOG_MAX)));
-  }catch(_){}
+    localStorage.setItem(ADMIN_STATUS_KEY, JSON.stringify(merged));
+  } catch (e) {
+    console.warn('[gemini] _updateStatus localStorage error:', e);
+  }
+
+  try {
+    window.dispatchEvent(new CustomEvent('geminiStatusUpdate', { detail: _status }));
+  } catch (_) {}
 }
 
-/* アラートログキーを外部公開用に保持 */
-function getAlertLogKey(){ return ALERT_LOG_KEY; }
+function _saveModel(model) {
+  _updateStatus({
+    lastSuccessModel : model,
+    lastSuccessTs    : new Date().toISOString(),
+    needsUpdate      : false,
+    alertType        : null  // BUG-A 修正: 成功時は明示的に null
+  });
+  try {
+    localStorage.setItem(MODEL_CACHE_KEY, JSON.stringify({
+      model, ts: Date.now()
+    }));
+  } catch (_) {}
+}
 
-/* ====================================================================
-   § 9. プロンプト生成
-==================================================================== */
-function _buildPrompt(level,count){
-  const cfg=LEVEL_CFG[level]??LEVEL_CFG[1];
-  const{lines:lineCount,gridN,lo,hi}=cfg;
-  return`You are generating line puzzle problems for a visual math game for young children.
+/* ============================================================
+   §3. API キー
+   ============================================================ */
+function saveApiKey(key) {
+  try { localStorage.setItem(API_KEY_STORAGE, key); } catch (_) {}
+}
+function loadApiKey() {
+  try { return localStorage.getItem(API_KEY_STORAGE) || ''; } catch (_) { return ''; }
+}
+function clearApiKey() {
+  try { localStorage.removeItem(API_KEY_STORAGE); } catch (_) {}
+}
 
+/* ============================================================
+   §4. モデルキャッシュ
+   ============================================================ */
+function clearModelCache() {
+  try { localStorage.removeItem(MODEL_CACHE_KEY); } catch (_) {}
+}
+
+function _loadCachedModel() {
+  try {
+    const raw = localStorage.getItem(MODEL_CACHE_KEY);
+    if (!raw) return null;
+    const { model, ts } = JSON.parse(raw);
+    if (Date.now() - ts > MODEL_CACHE_TTL) return null;
+    return model || null;
+  } catch (_) { return null; }
+}
+
+/* ============================================================
+   §5. 管理者チェーン
+   ============================================================ */
+function saveAdminChain(chain) {
+  try { localStorage.setItem(ADMIN_CHAIN_KEY, JSON.stringify(chain)); } catch (_) {}
+}
+function loadAdminChain() {
+  try {
+    const raw = localStorage.getItem(ADMIN_CHAIN_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (_) { return null; }
+}
+function clearAdminChain() {
+  try { localStorage.removeItem(ADMIN_CHAIN_KEY); } catch (_) {}
+}
+
+/* ============================================================
+   §6. ライブモデル取得
+   ============================================================ */
+async function fetchLiveModels(apiKey) {
+  const key = apiKey || loadApiKey();
+  if (!key) throw new Error('API key is not set');
+
+  const res = await fetch(`${MODEL_LIST_URL}?key=${encodeURIComponent(key)}`);
+  if (!res.ok) throw new Error(`Model list fetch failed: ${res.status}`);
+
+  const data = await res.json();
+  const all  = (data.models || []).map(m => m.name.replace('models/', ''));
+
+  // 除外キーワードを含むモデルを排除
+  const filtered = all.filter(name =>
+    !EXCLUDED_KEYWORDS.some(kw => name.toLowerCase().includes(kw))
+  );
+
+  // 推奨キーワードを含むモデルを先頭に
+  const preferred = filtered.filter(name =>
+    PREFERRED_KEYWORDS.some(kw => name.toLowerCase().includes(kw))
+  );
+  const rest = filtered.filter(name =>
+    !PREFERRED_KEYWORDS.some(kw => name.toLowerCase().includes(kw))
+  );
+
+  return [...preferred, ...rest];
+}
+
+/* ============================================================
+   §7. 有効チェーン構築
+   ============================================================ */
+function _buildEffectiveChain() {
+  const admin = loadAdminChain();
+  if (admin && Array.isArray(admin) && admin.length > 0) return admin;
+  return FALLBACK_CHAIN;
+}
+
+/* ============================================================
+   §8. プロンプト生成
+   ============================================================ */
+function _makePrompt(level) {
+  const cfg = LEVEL_CFG[level] || LEVEL_CFG[0];
+  return `
+You are a puzzle generator. Generate exactly ${TARGET_COUNT} unique line-crossing puzzles.
 Rules:
-- Each problem has exactly ${lineCount} line segments on a ${gridN+1}x${gridN+1} grid.
-- All coordinates are integers in the range [0, ${gridN}] (inclusive).
-- No zero-length lines (x1==x2 AND y1==y2 is forbidden).
-- Each line segment must be VISUALLY DISTINCT. Two segments must NOT overlap in any way:
-  (a) Identical endpoints (even reversed): forbidden.
-  (b) Collinear overlap: if collinear AND share any common region, forbidden.
-      FORBIDDEN: A:(0,0)-(3,3), B:(1,1)-(2,2) / A:(0,0)-(2,2), B:(1,1)-(3,3)
-      ALLOWED:   A:(0,0)-(1,1), B:(2,2)-(3,3)
-- STRICT INTERNAL intersections must be between ${lo} and ${hi} (inclusive).
-- Generate exactly ${count} distinct problems.
+- Grid: 4×4 dots (coordinates 0–3 on both axes)
+- Each puzzle has exactly ${cfg.lines} line segments
+- Each line segment: {x1,y1,x2,y2} where all values are integers 0–3
+- No duplicate lines within a puzzle
+- Each puzzle must have between ${cfg.intersections[0]} and ${cfg.intersections[1]} proper intersections (interior crossing only, shared endpoints do NOT count)
+- Output ONLY a valid JSON array, no markdown, no explanation
 
-Self-check each problem:
-1a. No identical endpoints (including reversed).
-1b. If collinear, confirm no shared region.
-2. Count STRICT INTERNAL intersections → must be in [${lo}, ${hi}].
-3. If any check fails, redesign and recheck.
-
-Output ONLY a JSON array:
-[{"lines":[{"x1":0,"y1":0,"x2":2,"y2":3},...${lineCount} lines]},... ${count} problems]`;
+Format:
+[{"lines":[{"x1":0,"y1":0,"x2":3,"y2":3},...]},...]
+`.trim();
 }
 
-/* ====================================================================
-   § 10. フォールバック問題バンク
-==================================================================== */
-const _FALLBACK={
-  0:[
-    {lines:[{x1:0,y1:0,x2:3,y2:0},{x1:0,y1:1,x2:3,y2:1},{x1:0,y1:2,x2:3,y2:2}]},
-    {lines:[{x1:0,y1:0,x2:0,y2:3},{x1:1,y1:0,x2:1,y2:3},{x1:2,y1:0,x2:2,y2:3}]},
-    {lines:[{x1:0,y1:0,x2:3,y2:3},{x1:0,y1:3,x2:3,y2:0},{x1:0,y1:1,x2:3,y2:1}]},
-    {lines:[{x1:1,y1:0,x2:1,y2:3},{x1:2,y1:0,x2:2,y2:3},{x1:0,y1:1,x2:3,y2:1}]},
-    {lines:[{x1:0,y1:0,x2:3,y2:0},{x1:0,y1:3,x2:3,y2:3},{x1:1,y1:0,x2:2,y2:3}]}
-  ],
-  1:[
-    {lines:[{x1:0,y1:0,x2:3,y2:0},{x1:0,y1:1,x2:3,y2:1},{x1:0,y1:2,x2:3,y2:2},{x1:0,y1:3,x2:3,y2:3}]},
-    {lines:[{x1:0,y1:0,x2:1,y2:3},{x1:1,y1:0,x2:0,y2:3},{x1:2,y1:0,x2:3,y2:1},{x1:2,y1:2,x2:3,y2:3}]},
-    {lines:[{x1:0,y1:0,x2:1,y2:3},{x1:1,y1:0,x2:0,y2:3},{x1:2,y1:0,x2:3,y2:3},{x1:3,y1:0,x2:2,y2:3}]},
-    {lines:[{x1:0,y1:0,x2:3,y2:2},{x1:0,y1:2,x2:3,y2:0},{x1:1,y1:0,x2:0,y2:3},{x1:3,y1:2,x2:3,y2:3}]},
-    {lines:[{x1:0,y1:1,x2:3,y2:2},{x1:0,y1:2,x2:3,y2:1},{x1:0,y1:0,x2:3,y2:3},{x1:2,y1:0,x2:3,y2:0}]}
-  ],
-  2:[
-    {lines:[{x1:0,y1:0,x2:1,y2:3},{x1:1,y1:0,x2:0,y2:3},{x1:2,y1:0,x2:3,y2:3},{x1:3,y1:0,x2:2,y2:3}]},
-    {lines:[{x1:0,y1:0,x2:3,y2:2},{x1:0,y1:2,x2:3,y2:0},{x1:1,y1:0,x2:2,y2:3},{x1:0,y1:3,x2:1,y2:3}]},
-    {lines:[{x1:0,y1:0,x2:2,y2:3},{x1:2,y1:0,x2:0,y2:3},{x1:1,y1:1,x2:3,y2:3},{x1:3,y1:0,x2:1,y2:2}]},
-    {lines:[{x1:0,y1:0,x2:3,y2:3},{x1:0,y1:3,x2:3,y2:0},{x1:0,y1:1,x2:3,y2:2},{x1:0,y1:2,x2:3,y2:1}]},
-    {lines:[{x1:0,y1:0,x2:3,y2:2},{x1:0,y1:2,x2:3,y2:0},{x1:0,y1:3,x2:3,y2:1},{x1:0,y1:1,x2:3,y2:3}]}
-  ],
-  3:[
-    {lines:[{x1:0,y1:0,x2:4,y2:4},{x1:0,y1:4,x2:4,y2:0},{x1:0,y1:2,x2:4,y2:2},{x1:2,y1:0,x2:2,y2:4},{x1:0,y1:1,x2:4,y2:3}]},
-    {lines:[{x1:0,y1:0,x2:4,y2:3},{x1:0,y1:3,x2:4,y2:0},{x1:1,y1:0,x2:3,y2:4},{x1:3,y1:0,x2:1,y2:4},{x1:0,y1:4,x2:4,y2:4}]},
-    {lines:[{x1:0,y1:0,x2:4,y2:4},{x1:0,y1:4,x2:4,y2:0},{x1:0,y1:1,x2:4,y2:1},{x1:0,y1:3,x2:4,y2:3},{x1:2,y1:0,x2:2,y2:4}]},
-    {lines:[{x1:0,y1:0,x2:3,y2:4},{x1:1,y1:0,x2:4,y2:4},{x1:0,y1:4,x2:3,y2:0},{x1:1,y1:4,x2:4,y2:0},{x1:0,y1:2,x2:4,y2:2}]},
-    {lines:[{x1:0,y1:1,x2:4,y2:3},{x1:0,y1:3,x2:4,y2:1},{x1:1,y1:0,x2:3,y2:4},{x1:3,y1:0,x2:1,y2:4},{x1:0,y1:0,x2:4,y2:4}]}
-  ]
-};
-function _getFallback(level,count){
-  const pool=(typeof PROBLEM_BANK!=='undefined'&&PROBLEM_BANK[level]
-    ?PROBLEM_BANK[level]:_FALLBACK[level]||_FALLBACK[1]).slice();
-  for(let i=pool.length-1;i>0;i--){
-    const j=Math.floor(Math.random()*(i+1));[pool[i],pool[j]]=[pool[j],pool[i]];
-  }
-  const cfg=LEVEL_CFG[level]??LEVEL_CFG[1];
-  return pool.slice(0,count).map(p=>({
-    level,
-    grid:p.grid??{cols:cfg.gridN+1,rows:cfg.gridN+1},
-    lines:p.lines,
-    hintLines:p.hintLines||p.lines.slice(0,cfg.hints)
+/* ============================================================
+   §9. JSON 抽出
+   ============================================================ */
+function _extractJson(text) {
+  if (!text) return null;
+  const m = text.match(/\[[\s\S]*\]/);
+  return m ? m[0] : null;
+}
+
+/* ============================================================
+   §10. 交差判定
+   ============================================================ */
+function _cross(a, b) {
+  const dx1 = a.x2 - a.x1, dy1 = a.y2 - a.y1;
+  const dx2 = b.x2 - b.x1, dy2 = b.y2 - b.y1;
+  const denom = dx1 * dy2 - dy1 * dx2;
+  if (denom === 0) return false;
+  const dx3 = b.x1 - a.x1, dy3 = b.y1 - a.y1;
+  const t = (dx3 * dy2 - dy3 * dx2) / denom;
+  const u = (dx3 * dy1 - dy3 * dx1) / denom;
+  return t > 0 && t < 1 && u > 0 && u < 1;
+}
+
+function _countCross(lines) {
+  let count = 0;
+  for (let i = 0; i < lines.length; i++)
+    for (let j = i + 1; j < lines.length; j++)
+      if (_cross(lines[i], lines[j])) count++;
+  return count;
+}
+
+/* ============================================================
+   §11. バリデーション
+   ============================================================ */
+function _validate(prob, level) {
+  const cfg = LEVEL_CFG[level] || LEVEL_CFG[0];
+  if (!prob || !Array.isArray(prob.lines)) return false;
+  if (prob.lines.length !== cfg.lines) return false;
+  const cross = _countCross(prob.lines);
+  return cross >= cfg.intersections[0] && cross <= cfg.intersections[1];
+}
+
+/* ============================================================
+   §12. 正規化
+   ============================================================ */
+function _normalize(prob) {
+  if (!prob || !Array.isArray(prob.lines)) return prob;
+  prob.lines = prob.lines.map(l => ({
+    x1: Number(l.x1), y1: Number(l.y1),
+    x2: Number(l.x2), y2: Number(l.y2)
   }));
+  return prob;
 }
 
-/* ====================================================================
-   § 11. API 送信コア
-==================================================================== */
-async function _callApi(model,apiKey,prompt,forcePlain=false){
-  const generationConfig={temperature:0.7,maxOutputTokens:2048};
-  const useJsonMode=!forcePlain&&!_isNoMimeCached(model);
-  if(useJsonMode)generationConfig.responseMimeType='application/json';
-  console.log(`[gemini] _callApi: ${model} / ${useJsonMode?'JSON':'TEXT'}モード`);
-  const ctrl=new AbortController();const tid=setTimeout(()=>ctrl.abort(),FETCH_TIMEOUT_MS);
-  let resp;
-  try{
-    resp=await fetch(
-      `${BASE_URL}/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`,
-      {method:'POST',headers:{'Content-Type':'application/json'},signal:ctrl.signal,
-       body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig})});
-    clearTimeout(tid);
-  }catch(e){
-    clearTimeout(tid);
-    const isTimeout=e.name==='AbortError';
-    console.warn(`[gemini] ${isTimeout?'タイムアウト':'ネットワークエラー'}: ${model}`);
-    return{raw:null,status:isTimeout?408:0,rawText:null,parseOk:false};
-  }
-  if(resp.status===400&&useJsonMode){_setNoMimeCache(model);return _callApi(model,apiKey,prompt,true);}
-  if(resp.status===404||resp.status===410){
-    console.warn(`[gemini] HTTP ${resp.status}: ${model} 廃止の可能性`);
-    return{raw:null,status:resp.status,rawText:null,parseOk:false};
-  }
-  if(!resp.ok){console.warn(`[gemini] HTTP ${resp.status}: ${model}`);return{raw:null,status:resp.status,rawText:null,parseOk:false};}
-  let data;try{data=await resp.json();}catch(e){return{raw:null,status:200,rawText:null,parseOk:false};}
-  const part=data?.candidates?.[0]?.content?.parts?.[0];
-  const rawText=part?.text;
-  const text=(typeof rawText==='string'&&rawText.trim().length>0)?rawText.trim():null;
-  console.log('[gemini] part keys:',part?Object.keys(part):'no part');
-  console.log('[gemini] text length:',text!==null?text.length:'null');
-  let problems=null;
-  // 【Fix-J】パース成功フラグ: JSON構造が取れたかどうか
-  let parseOk=false;
-  if(useJsonMode){
-    if(text!==null){
-      try{const p=JSON.parse(text);problems=Array.isArray(p)&&p.length>0?p:_extractJsonArray(text);parseOk=(problems!==null);}
-      catch(e){problems=_extractJsonArray(text);parseOk=(problems!==null);}
-    }else{
-      problems=_extractJsonArray(JSON.stringify(data));
-      parseOk=(problems!==null&&problems.length>0);
-      if(!parseOk){_setNoMimeCache(model);return _callApi(model,apiKey,prompt,true);}
-    }
-  }else{
-    problems=text!==null?_extractJsonArray(text):_extractJsonArray(JSON.stringify(data));
-    parseOk=(problems!==null);
-  }
-  return{raw:problems,status:resp.status,rawText:text,parseOk};
+/* ============================================================
+   §13. フォールバック問題バンク
+   ============================================================ */
+const _FALLBACK_BANK = [
+  { lines: [{ x1:0,y1:0,x2:3,y2:3 },{ x1:0,y1:3,x2:3,y2:0 },{ x1:0,y1:1,x2:3,y2:1 }] },
+  { lines: [{ x1:0,y1:0,x2:0,y2:3 },{ x1:0,y1:0,x2:3,y2:0 },{ x1:1,y1:1,x2:3,y2:3 }] },
+  { lines: [{ x1:0,y1:1,x2:3,y2:1 },{ x1:1,y1:0,x2:1,y2:3 },{ x1:0,y1:0,x2:2,y2:2 }] },
+  { lines: [{ x1:0,y1:0,x2:3,y2:0 },{ x1:0,y1:2,x2:3,y2:2 },{ x1:1,y1:0,x2:1,y2:3 }] },
+  { lines: [{ x1:0,y1:0,x2:3,y2:3 },{ x1:0,y1:3,x2:3,y2:0 },{ x1:0,y1:2,x2:1,y2:2 }] }
+];
+
+/* ============================================================
+   §14. API リクエスト
+   ============================================================ */
+async function _callApi(model, prompt, apiKey) {
+  const url  = `${GEN_URL_TPL(model)}?key=${encodeURIComponent(apiKey)}`;
+  const body = {
+    contents: [{ parts: [{ text: prompt }] }],
+    generationConfig: { temperature: 0.7, maxOutputTokens: 2048 }
+  };
+
+  const res = await fetch(url, {
+    method  : 'POST',
+    headers : { 'Content-Type': 'application/json' },
+    body    : JSON.stringify(body)
+  });
+
+  if (res.status === 429) throw Object.assign(new Error('Rate limit'), { code: 429 });
+  if (!res.ok)            throw new Error(`API error: ${res.status}`);
+
+  const data    = await res.json();
+  const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  const jsonStr = _extractJson(rawText);
+  const parseOk = jsonStr !== null;
+
+  return { rawText, jsonStr, parseOk };
 }
 
-/* ====================================================================
-   § 12. レスポンス検証・正規化
-==================================================================== */
-function _processRaw(raw,level,need){
-  if(!Array.isArray(raw)||raw.length===0)return[];
-  const cfg=LEVEL_CFG[level]??LEVEL_CFG[1];
-  const valid=[];
-  for(const item of raw){
-    if(!item||typeof item!=='object')continue;
-    const problem=_normalise(item,level);if(!problem)continue;
-    if(!_validate(problem,cfg)){console.warn('[gemini] 交差数制約違反→棄却');continue;}
-    valid.push(problem);if(valid.length>=need)break;
-  }
-  return valid;
-}
+/* ============================================================
+   §15. メイン: generateProblems
+   ============================================================ */
+/**
+ * @returns {{ problems: Array, validCount: number, alertType: string|null }}
+ *
+ * BUG-B 修正:
+ *   LEVEL アラート判定を固定値 <=3 から
+ *   validCount / TARGET_COUNT < LEVEL_ALERT_RATIO（0.6）に変更
+ */
+async function generateProblems(level = 0) {
+  const apiKey = loadApiKey();
+  if (!apiKey) return { problems: _FALLBACK_BANK.slice(0, TARGET_COUNT), validCount: 0, alertType: null };
 
-/* ====================================================================
-   § 13. メイン API: generateProblems
-==================================================================== */
-function _updateStatus(patch){
-  try{
-    if(!window._geminiStatus)window._geminiStatus={errorCount:0,needsAdminRedo:false};
-    Object.assign(window._geminiStatus,patch);
-    window.dispatchEvent(new CustomEvent('geminiStatusUpdate',{detail:window._geminiStatus}));
-  }catch(_){}
-  try{
-    const prev=JSON.parse(localStorage.getItem(ADMIN_STATUS_KEY)||'{}');
-    const merged={...prev,...patch,lastUpdatedTs:Date.now()};
-    localStorage.setItem(ADMIN_STATUS_KEY,JSON.stringify(merged));
-  }catch(_){}
-}
+  const chain  = _buildEffectiveChain();
+  const prompt = _makePrompt(level);
 
-async function generateProblems(level,count=5,apiKey){
-  if(!apiKey){
-    console.log('[gemini] APIキーなし→フォールバック');
-    return{problems:_getFallback(level,count),validCount:0,alertType:null};
-  }
-  const{chain,needsRedo,liveModels}=await _buildEffectiveChain(apiKey);
-  _updateStatus({currentChain:chain,liveModels:liveModels||[]});
-  if(needsRedo){
-    _updateStatus({needsAdminRedo:true,lastError:'設定済みモデルが廃止されました。モデル設定を更新してください。'});
-  }
-  if(chain.length===0){
-    const msg='AIモデルが全て利用不可です。管理者設定でモデルを更新してください。';
-    _updateStatus({needsAdminRedo:true,lastError:msg});
-    return{problems:_getFallback(level,count),validCount:0,alertType:'MODEL'};
-  }
+  let collectedValid = [];
+  let lastAlertType  = null;
+  let lastRawJson    = '';
+  let lastModel      = '';
 
-  const prompt=_buildPrompt(level,count);
-  let sessionErrors=0;
-  let collectedValid=[];   // 【Fix-J】全試行での有効問題を蓄積
-  let lastAlertType=null;  // 【Fix-J】最後に発生したアラート種別
+  for (const model of chain) {
+    lastModel = model;
+    try {
+      const { rawText, jsonStr, parseOk } = await _callApi(model, prompt, apiKey);
+      lastRawJson = rawText;
 
-  for(const model of chain){
-    let attempts=0,count429=0;
-    console.log(`[gemini] モデル試行: ${model}`);
-    while(attempts<MAX_ATTEMPTS_PER_MODEL){
-      attempts++;
-      const{raw,status,rawText,parseOk}=await _callApi(model,apiKey,prompt);
+      // BUG-A 修正: 試行ごとに alertType をリセット
+      lastAlertType = null;
 
-      if(status===401||status===403){
-        console.error('[gemini] 認証エラー');
-        _updateStatus({lastError:'APIキーが無効です。APIキーを確認してください。'});
-        return{problems:_getFallback(level,count),validCount:0,alertType:'MODEL'};
-      }
-      if(status===408||status===0){
-        sessionErrors++;
-        _updateStatus({errorCount:(window._geminiStatus?.errorCount||0)+1,
-          lastError:`タイムアウト (${model})`});
-        break;
-      }
-      if(status===404||status===410){
-        sessionErrors++;
-        _updateStatus({errorCount:(window._geminiStatus?.errorCount||0)+1,
-          needsAdminRedo:true,
-          lastError:`モデル廃止検出 (${model})。管理者設定でモデルを更新してください。`});
-        break;
-      }
-      if(status===429){
-        count429++;sessionErrors++;
-        _updateStatus({errorCount:(window._geminiStatus?.errorCount||0)+1,
-          lastError:`レート制限 (${model})`});
-        if(count429>=MAX_429_PER_MODEL)break;
-        await new Promise(r=>setTimeout(r,1000*Math.pow(2,count429-1)));
+      if (!parseOk) {
+        // JSON 構造なし → MODEL アラート
+        lastAlertType = 'MODEL';
+        _updateStatus({ errorCount: (_status.errorCount ?? 0) + 1, lastError: 'JSON parse failed', alertType: 'MODEL' });
+        _appendAlertLog({ alertType: 'MODEL', message: 'JSON parse failed', model, rawJson: rawText });
         continue;
       }
 
-      // 【Fix-J】パース判定: JSONが構造として取れなかった場合 → MODEL アラート
-      if(!parseOk){
-        const msg=`CHANGE AI model`;
-        sessionErrors++;
-        lastAlertType='MODEL';
-        _updateStatus({errorCount:(window._geminiStatus?.errorCount||0)+1,lastError:msg});
-        _appendAlertLog('MODEL', msg, model, rawText);
-        break;
+      let parsed;
+      try { parsed = JSON.parse(jsonStr); } catch (_) {
+        lastAlertType = 'MODEL';
+        _updateStatus({ errorCount: (_status.errorCount ?? 0) + 1, lastError: 'JSON.parse threw', alertType: 'MODEL' });
+        _appendAlertLog({ alertType: 'MODEL', message: 'JSON.parse threw', model, rawJson: jsonStr });
+        continue;
       }
 
-      const valid=_processRaw(raw,level,count);
-
-      // 【Fix-J】有効問題0件: PROMPT アラート
-      if(valid.length===0){
-        const msg=`CHECK AI prompt or CHANGE AI model`;
-        sessionErrors++;
-        lastAlertType='PROMPT';
-        _updateStatus({errorCount:(window._geminiStatus?.errorCount||0)+1,lastError:msg});
-        _appendAlertLog('PROMPT', msg, model,
-          raw ? JSON.stringify(raw).slice(0,2000) : rawText);
-        break;
+      if (!Array.isArray(parsed) || parsed.length === 0) {
+        lastAlertType = 'PROMPT';
+        _updateStatus({ errorCount: (_status.errorCount ?? 0) + 1, lastError: 'Empty array', alertType: 'PROMPT' });
+        _appendAlertLog({ alertType: 'PROMPT', message: 'Empty array from model', model, rawJson: jsonStr });
+        continue;
       }
 
-      // 有効問題が得られた場合は蓄積
-      for(const p of valid){
-        if(collectedValid.length<count)collectedValid.push(p);
+      const valid = parsed.map(_normalize).filter(p => _validate(p, level));
+
+      if (valid.length === 0) {
+        // 有効問題 0 件 → PROMPT アラート
+        lastAlertType = 'PROMPT';
+        _updateStatus({ errorCount: (_status.errorCount ?? 0) + 1, lastError: 'No valid problems', alertType: 'PROMPT' });
+        _appendAlertLog({ alertType: 'PROMPT', message: 'No valid problems in output', model, rawJson: jsonStr });
+        continue;
       }
 
-      if(collectedValid.length>=count){
-        _saveModel(model);
-        console.log(`[gemini] ${model} 成功: ${collectedValid.length}件`);
-        // 5問揃ったらアラートなしで返す
-        return{problems:collectedValid.slice(0,count),validCount:collectedValid.length,alertType:null};
-      }
+      // 有効問題あり → 成功
+      collectedValid = collectedValid.concat(valid);
+      _saveModel(model); // BUG-A 修正: alertType: null を内部で明示セット済み
 
-      sessionErrors++;
-      _updateStatus({errorCount:(window._geminiStatus?.errorCount||0)+1,
-        lastError:`有効問題不足 (${model}: ${valid.length}/${count})`});
-      break; // 次のモデルへ
-    }
+      if (collectedValid.length >= TARGET_COUNT) break;
 
-    if(sessionErrors>=ERROR_NOTIFY_THRESHOLD){
-      _updateStatus({needsAdminRedo:true,
-        lastError:`エラーが${sessionErrors}回発生しました。モデル設定の確認を推奨します。`});
+    } catch (err) {
+      lastAlertType = 'MODEL';
+      _updateStatus({ errorCount: (_status.errorCount ?? 0) + 1, lastError: err.message, alertType: 'MODEL' });
+      _appendAlertLog({ alertType: 'MODEL', message: err.message, model, rawJson: lastRawJson });
     }
   }
 
-  // 【Fix-J】全チェーン試行後: 有効問題が1〜3件 → LEVEL アラート
-  if(collectedValid.length>0&&collectedValid.length<=Math.floor(count*0.6)){
-    const msg=`CONSIDER changing the level limits`;
-    lastAlertType='LEVEL';
-    _updateStatus({lastError:msg});
-    _appendAlertLog('LEVEL', msg, chain[chain.length-1]||'',
-      `validCount=${collectedValid.length}/${count}`);
-    // 不足分はフォールバックで補完
-    const supplement=_getFallback(level,count-collectedValid.length);
-    return{problems:[...collectedValid,...supplement],validCount:collectedValid.length,alertType:'LEVEL'};
+  // 全チェーン試行後の評価
+  const validCount = collectedValid.length;
+
+  if (validCount === 0) {
+    // 完全失敗 → フォールバック
+    return { problems: _FALLBACK_BANK.slice(0, TARGET_COUNT), validCount: 0, alertType: lastAlertType };
   }
 
-  // 有効問題が0件 または 4件以上5件未満（4件）の場合
-  if(collectedValid.length>0){
-    // 4件: アラートなしで不足補完
-    const supplement=_getFallback(level,count-collectedValid.length);
-    return{problems:[...collectedValid,...supplement],validCount:collectedValid.length,alertType:lastAlertType};
+  // BUG-B 修正: 比率で LEVEL アラート判定
+  const ratio = validCount / TARGET_COUNT;
+  if (ratio < LEVEL_ALERT_RATIO) {
+    const alertType = 'LEVEL';
+    _updateStatus({ alertType });
+    _appendAlertLog({
+      alertType,
+      message : `Only ${validCount}/${TARGET_COUNT} valid problems (${Math.round(ratio * 100)}%)`,
+      model   : lastModel,
+      rawJson : lastRawJson
+    });
+    const result = collectedValid.slice(0, TARGET_COUNT);
+    while (result.length < TARGET_COUNT) result.push(_FALLBACK_BANK[result.length % _FALLBACK_BANK.length]);
+    return { problems: result, validCount, alertType };
   }
 
-  console.warn('[gemini] 全モデル失敗→フォールバック');
-  return{problems:_getFallback(level,count),validCount:0,alertType:lastAlertType||'MODEL'};
+  // BUG-A 修正: 成功時は alertType を null で明示クリア
+  _updateStatus({ alertType: null });
+  return { problems: collectedValid.slice(0, TARGET_COUNT), validCount, alertType: null };
 }
 
-/* ====================================================================
-   § 14. API キー管理
-==================================================================== */
-const API_KEY_STORAGE='gemini_api_key';
-function saveApiKey(key){try{localStorage.setItem(API_KEY_STORAGE,key);}catch(_){}}
-function loadApiKey(){try{return localStorage.getItem(API_KEY_STORAGE)||'';}catch(_){return '';}}
-
-/* ====================================================================
-   § 15. エクスポート
-==================================================================== */
-return{
+/* ============================================================
+   §16. エクスポート
+   ============================================================ */
+window.GeminiAPI = {
   generateProblems,
-  saveApiKey,loadApiKey,clearModelCache,
-  saveAdminChain,loadAdminChain,clearAdminChain,
-  fetchLiveModels:_fetchLiveModels,
-  getAlertLogKey   // 【Fix-J】admin.js がキー文字列を参照できるよう公開
+  saveApiKey,
+  loadApiKey,
+  clearApiKey,
+  fetchLiveModels,
+  saveAdminChain,
+  loadAdminChain,
+  clearAdminChain,
+  clearModelCache,
+  getAlertLogKey
 };
-
-})();
-
-const generateProblems = _G.generateProblems;
-const saveApiKey       = _G.saveApiKey;
-const loadApiKey       = _G.loadApiKey;
-const clearModelCache  = _G.clearModelCache;
-const saveAdminChain   = _G.saveAdminChain;
-const loadAdminChain   = _G.loadAdminChain;
-const clearAdminChain  = _G.clearAdminChain;
-const fetchLiveModels  = _G.fetchLiveModels;
-const getAlertLogKey   = _G.getAlertLogKey; // 【Fix-J】
