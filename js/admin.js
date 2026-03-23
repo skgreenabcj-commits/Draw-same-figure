@@ -1,18 +1,27 @@
 /**
- * admin.js  v1.0
+ * admin.js  v1.1
  * 管理者設定画面（admin.html）専用ロジック
+ *
+ * 【v1.1 変更点】
+ *   - §5 アラートログセクションを新規追加
+ *     - localStorage('gemini_alert_log_v1') からアラートを読み込み表示
+ *     - 各エントリ: ts（日時）・alertType・message・model・rawJson を表示
+ *     - 「アラートログをクリア」ボタンを追加
+ *   - §3 の admin_log_v1 は操作ログとして維持（混在しない）
  *
  * 依存: gemini.js（saveApiKey, loadApiKey, fetchLiveModels,
  *                  saveAdminChain, loadAdminChain, clearAdminChain,
- *                  clearModelCache）
+ *                  clearModelCache, getAlertLogKey）
  */
-const ADMIN_STATUS_KEY_LOCAL = 'gemini_admin_status_v1'; // gemini.js の ADMIN_STATUS_KEY と同値
-const MODEL_CACHE_KEY_LOCAL  = 'gemini_model_v3';        // gemini.js の MODEL_CACHE_KEY と同値
+
+const ADMIN_STATUS_KEY_LOCAL = 'gemini_admin_status_v1';
+const MODEL_CACHE_KEY_LOCAL  = 'gemini_model_v3';
+
 /* ========================================================
-   ログストレージ
+   操作ログストレージ（admin.js 内の操作記録）
    ======================================================== */
-const ADMIN_LOG_KEY     = 'admin_log_v1';
-const ADMIN_LOG_MAX     = 50; // 最大保持件数
+const ADMIN_LOG_KEY = 'admin_log_v1';
+const ADMIN_LOG_MAX = 50;
 
 function _loadLog() {
   try { return JSON.parse(localStorage.getItem(ADMIN_LOG_KEY) || '[]'); } catch(_) { return []; }
@@ -47,26 +56,23 @@ function _setStatus(elId, msg, type = 'info') {
 function _isLite(name) { return name.includes('flash-lite'); }
 
 /* ========================================================
-   §1. APIキーセクション
+   §1. APIキーセクション（変更なし）
    ======================================================== */
 function initApiKeySection() {
-  const inputEl   = document.getElementById('input-admin-apikey');
-  const eyeBtn    = document.getElementById('btn-admin-apikey-show');
-  const eyeIcon   = document.getElementById('apikey-eye-icon');
-  const saveBtn   = document.getElementById('btn-admin-apikey-save');
+  const inputEl = document.getElementById('input-admin-apikey');
+  const eyeBtn  = document.getElementById('btn-admin-apikey-show');
+  const eyeIcon = document.getElementById('apikey-eye-icon');
+  const saveBtn = document.getElementById('btn-admin-apikey-save');
 
-  // 保存済みキーをロード
   const saved = loadApiKey();
   if (saved) { inputEl.value = saved; _setStatus('apikey-status', '✅ APIキーが設定されています', 'ok'); }
 
-  // 表示/非表示トグル
   eyeBtn.addEventListener('click', () => {
     const isPassword = inputEl.type === 'password';
-    inputEl.type     = isPassword ? 'text' : 'password';
+    inputEl.type      = isPassword ? 'text' : 'password';
     eyeIcon.className = isPassword ? 'fa fa-eye-slash' : 'fa fa-eye';
   });
 
-  // 保存
   saveBtn.addEventListener('click', () => {
     const key = inputEl.value.trim();
     if (key) {
@@ -74,7 +80,6 @@ function initApiKeySection() {
       clearModelCache();
       _setStatus('apikey-status', '✅ APIキーを保存しました', 'ok');
       _appendLog('info', 'APIキーを更新しました');
-      // モデル一覧が既に表示済みなら再取得
       if (!document.getElementById('select-model-1').disabled) fetchAndPopulateModels(key);
     } else {
       saveApiKey('');
@@ -86,16 +91,12 @@ function initApiKeySection() {
 }
 
 /* ========================================================
-   §2. モデル優先順位セクション
+   §2. モデル優先順位セクション（変更なし）
    ======================================================== */
-let _liveModels = []; // 取得したライブモデル一覧をキャッシュ
+let _liveModels = [];
 
-/**
- * ライブモデルを取得してプルダウンを構築する。
- */
 async function fetchAndPopulateModels(apiKey) {
   _setStatus('models-fetch-status', '🔄 モデル一覧を取得中...', 'info');
-  // キャッシュをクリアして最新を取得
   try { localStorage.removeItem('gemini_live_models_v1'); } catch(_) {}
 
   const models = await fetchLiveModels(apiKey);
@@ -109,15 +110,12 @@ async function fetchAndPopulateModels(apiKey) {
   _setStatus('models-fetch-status', `✅ ${models.length}件のモデルを取得しました`, 'ok');
   _appendLog('info', `ライブモデル取得成功: ${models.join(', ')}`);
 
-  // 現在の管理者チェーン
   const current = loadAdminChain() || [];
 
-  // プルダウンを構築 (1〜3)
   [1, 2, 3].forEach(priority => {
     const sel = document.getElementById(`select-model-${priority}`);
     sel.innerHTML = '';
 
-    // 「なし」オプション（第1優先以外のみ）
     if (priority > 1) {
       const noneOpt = document.createElement('option');
       noneOpt.value       = '';
@@ -125,7 +123,6 @@ async function fetchAndPopulateModels(apiKey) {
       sel.appendChild(noneOpt);
     }
 
-    // モデルオプション
     models.forEach(m => {
       const opt       = document.createElement('option');
       opt.value       = m;
@@ -135,11 +132,9 @@ async function fetchAndPopulateModels(apiKey) {
 
     sel.disabled = false;
 
-    // 保存済みチェーンの値を反映
     if (current[priority - 1]) {
       sel.value = current[priority - 1];
     } else if (priority === 1) {
-      // デフォルト: flash-lite があれば優先
       const lite = models.find(m => _isLite(m));
       sel.value = lite || models[0] || '';
     }
@@ -152,9 +147,6 @@ async function fetchAndPopulateModels(apiKey) {
   _renderCurrentChain();
 }
 
-/**
- * プルダウン横の推奨ノートを更新する。
- */
 function _updatePriorityNote(priority) {
   const sel  = document.getElementById(`select-model-${priority}`);
   const note = document.getElementById(`note-model-${priority}`);
@@ -163,12 +155,9 @@ function _updatePriorityNote(priority) {
   note.className   = _isLite(sel.value) ? 'priority-note priority-note--recommend' : 'priority-note';
 }
 
-/**
- * 「現在の有効チェーン」バッジを表示する。
- */
 function _renderCurrentChain() {
-  const chain = loadAdminChain();
-  const box   = document.getElementById('current-chain-display');
+  const chain  = loadAdminChain();
+  const box    = document.getElementById('current-chain-display');
   const badges = document.getElementById('current-chain-badges');
   if (!chain || chain.length === 0) { box.style.display = 'none'; return; }
   box.style.display = 'block';
@@ -177,9 +166,6 @@ function _renderCurrentChain() {
   ).join('');
 }
 
-/**
- * 優先順位を保存する。
- */
 function saveChain() {
   const sel1 = document.getElementById('select-model-1').value;
   const sel2 = document.getElementById('select-model-2').value;
@@ -187,7 +173,6 @@ function saveChain() {
 
   if (!sel1) { _setStatus('chain-save-status', '⚠️ 第1優先モデルを選択してください', 'warn'); return; }
 
-  // 重複チェック
   const chosen = [sel1, sel2, sel3].filter(Boolean);
   const unique  = [...new Set(chosen)];
   if (unique.length < chosen.length) {
@@ -221,7 +206,6 @@ function initModelSection() {
     _setStatus('chain-save-status', '🗑️ 設定をリセットしました。デフォルトチェーンが使用されます。', 'info');
     _appendLog('warn', '管理者チェーンをリセットしました');
     _renderCurrentChain();
-    // プルダウンを無効化
     [1,2,3].forEach(p => {
       const sel = document.getElementById(`select-model-${p}`);
       sel.innerHTML = `<option value="">— モデルを取得してください —</option>`;
@@ -230,16 +214,13 @@ function initModelSection() {
     document.getElementById('btn-save-chain').disabled = true;
   });
 
-  // 初期表示
   _renderCurrentChain();
-
-  // APIキー設定済みなら自動取得
   const apiKey = loadApiKey();
   if (apiKey) fetchAndPopulateModels(apiKey);
 }
 
 /* ========================================================
-   §3. ログ・ステータスセクション
+   §3. ステータス／操作ログセクション（変更なし）
    ======================================================== */
 function _getRecommendedAction(lastError) {
   if (!lastError) return '';
@@ -251,17 +232,18 @@ function _getRecommendedAction(lastError) {
     return '👉 推奨アクション: ネットワーク環境を確認するか、高速なモデル（flash-lite）を第1優先に設定してください。';
   if (lastError.includes('レート制限') || lastError.includes('429'))
     return '👉 推奨アクション: しばらく時間をおいてから再試行してください。';
+  if (lastError.includes('CHANGE AI model') || lastError.includes('CHECK AI prompt'))
+    return '👉 推奨アクション: 「AIモデル優先順位」セクションで別のモデルを選択してください。';
+  if (lastError.includes('CONSIDER changing'))
+    return '👉 推奨アクション: 「AIモデル優先順位」のモデルを変更するか、レベル設定を見直してください。';
   if (lastError.includes('エラーが'))
     return '👉 推奨アクション: モデル設定を確認し、利用可能なモデルに更新してください。';
   return '👉 推奨アクション: ゲーム画面を再読み込みして再試行してください。';
 }
 
 function refreshStatus() {
-  // window._geminiStatus は index.html（ゲーム画面）のコンテキストにあるため、
-  // admin.html ではローカルストレージのキャッシュから情報を取得する。
   const status = _loadAdminStatus();
 
-  // カード更新
   document.getElementById('val-error-count').textContent =
     status.errorCount !== undefined ? String(status.errorCount) : '—';
   document.getElementById('val-last-model').textContent =
@@ -269,33 +251,25 @@ function refreshStatus() {
   document.getElementById('val-needs-redo').textContent =
     status.needsAdminRedo ? '⚠️ 更新が必要' : (status.errorCount > 0 ? '確認推奨' : '✅ 問題なし');
 
-  // 最後のエラー
   const errorBox = document.getElementById('last-error-box');
   if (status.lastError) {
     errorBox.style.display = 'block';
-    document.getElementById('last-error-msg').textContent = status.lastError;
+    document.getElementById('last-error-msg').textContent    = status.lastError;
     document.getElementById('last-error-action').textContent = _getRecommendedAction(status.lastError);
   } else {
     errorBox.style.display = 'none';
   }
 
-  // ログ一覧
   renderLog();
 }
 
-/**
- * ローカルストレージからゲーム側が書き込むステータスを読む。
- * gemini.js の _updateStatus は window._geminiStatus に書くが
- * admin.html は別ページのため、gemini.js が localStorage にも
- * 書き込む仕組みが必要。以下は既存の MODEL_CACHE_KEY などを利用。
- */
 function _loadAdminStatus() {
   const base = { errorCount: 0, lastError: '', needsAdminRedo: false, lastSuccessModel: '' };
   try {
     const raw = localStorage.getItem(ADMIN_STATUS_KEY_LOCAL);
     if (raw) return { ...base, ...JSON.parse(raw) };
   } catch(_) {}
-  return base; // gemini_model_v3 補完ブロックを削除（Fix-I により不要）
+  return base;
 }
 
 function renderLog() {
@@ -315,7 +289,10 @@ function renderLog() {
 }
 
 function initLogSection() {
-  document.getElementById('btn-refresh-status').addEventListener('click', refreshStatus);
+  document.getElementById('btn-refresh-status').addEventListener('click', () => {
+    refreshStatus();
+    renderAlertLog(); // 【v1.1】アラートログも同時に更新
+  });
   document.getElementById('btn-clear-log').addEventListener('click', () => {
     if (!confirm('ログをクリアしますか？')) return;
     localStorage.removeItem(ADMIN_LOG_KEY);
@@ -325,21 +302,12 @@ function initLogSection() {
 }
 
 /* ========================================================
-   §4. gemini.js へのステータス永続化パッチ
-   ──────────────────────────────────────────────────────
- * ゲーム画面(index.html)側で発生した geminiStatusUpdate イベントは
- * admin.html には届きません（別ページのため）。
- * ゲームプレイ後にこのページを開く/更新すると、gemini.js が
- * localStorage('gemini_admin_status_v1') に書き込んだデータを
- * _loadAdminStatus() で読み込んで表示します。
- * 以下のリスナーは admin.html 上で直接 fetchLiveModels() 等を
- * 呼び出した際のみ発火します。
+   §4. geminiStatusUpdate パッチ（変更なし）
    ======================================================== */
 window.addEventListener('geminiStatusUpdate', (e) => {
   const s = e.detail;
   if (!s) return;
   try {
-    // 既存エントリとマージして保存
     const prev = JSON.parse(localStorage.getItem('gemini_admin_status_v1') || '{}');
     localStorage.setItem('gemini_admin_status_v1', JSON.stringify({ ...prev, ...s }));
   } catch(_) {}
@@ -348,10 +316,84 @@ window.addEventListener('geminiStatusUpdate', (e) => {
 });
 
 /* ========================================================
+   §5. 【v1.1】アラートログセクション
+   ======================================================== */
+
+/**
+ * alertType バッジの表示ラベルと色クラスを返す。
+ */
+function _alertTypeMeta(alertType) {
+  switch (alertType) {
+    case 'MODEL':  return { label: 'MODEL',  cls: 'alert-type--model'  };
+    case 'PROMPT': return { label: 'PROMPT', cls: 'alert-type--prompt' };
+    case 'LEVEL':  return { label: 'LEVEL',  cls: 'alert-type--level'  };
+    default:       return { label: alertType || '?', cls: 'alert-type--other' };
+  }
+}
+
+/**
+ * アラートログを DOM に描画する。
+ * rawJson は折りたたみ可能な <details> で表示する。
+ */
+function renderAlertLog() {
+  const key     = getAlertLogKey();           // 'gemini_alert_log_v1'
+  const listEl  = document.getElementById('alert-log-list');
+  if (!listEl) return;
+
+  let entries = [];
+  try { entries = JSON.parse(localStorage.getItem(key) || '[]'); } catch(_) {}
+
+  // アラート件数バッジを更新
+  const countEl = document.getElementById('val-alert-count');
+  if (countEl) countEl.textContent = String(entries.length);
+
+  if (entries.length === 0) {
+    listEl.innerHTML = '<p class="admin-log-empty">アラートはまだありません。</p>';
+    return;
+  }
+
+  listEl.innerHTML = [...entries].reverse().map((e, idx) => {
+    const meta      = _alertTypeMeta(e.alertType);
+    const rawSafe   = e.rawJson
+      ? String(e.rawJson).replace(/</g,'&lt;').replace(/>/g,'&gt;')
+      : '(なし)';
+    const detailsId = `alert-raw-${idx}`;
+    return `
+      <div class="alert-log-entry alert-log-entry--${(e.alertType||'other').toLowerCase()}">
+        <div class="alert-log-header">
+          <span class="alert-log-ts">${_fmt(e.ts)}</span>
+          <span class="alert-type-badge ${meta.cls}">${meta.label}</span>
+          <span class="alert-log-model">${e.model || '—'}</span>
+        </div>
+        <div class="alert-log-msg">${e.message || ''}</div>
+        <details class="alert-log-raw" id="${detailsId}">
+          <summary class="alert-log-raw-summary">JSON出力を表示</summary>
+          <pre class="alert-log-raw-pre">${rawSafe}</pre>
+        </details>
+      </div>`;
+  }).join('');
+}
+
+function initAlertLogSection() {
+  const clearBtn = document.getElementById('btn-clear-alert-log');
+  if (clearBtn) {
+    clearBtn.addEventListener('click', () => {
+      if (!confirm('アラートログをクリアしますか？')) return;
+      const key = getAlertLogKey();
+      localStorage.removeItem(key);
+      renderAlertLog();
+      _appendLog('warn', 'アラートログをクリアしました');
+    });
+  }
+  renderAlertLog();
+}
+
+/* ========================================================
    DOMContentLoaded
    ======================================================== */
 document.addEventListener('DOMContentLoaded', () => {
   initApiKeySection();
   initModelSection();
   initLogSection();
+  initAlertLogSection(); // 【v1.1】
 });
