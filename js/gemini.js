@@ -1,24 +1,17 @@
 'use strict';
 
 /* =====================================================================
-   gemini.js  v5.8
+   gemini.js  v5.9
    -----------------------------------------------------------------------
-   v5.8 からの変更点（v5.7 → v5.8）:
-     【Fix-I】_updateStatus に localStorage 永続化を追加
-       - _updateStatus 呼び出しのたびに 'gemini_admin_status_v1' へ
-         マージ書き込みを行う
-       - admin.html（別ページ）が localStorage を読むことで
-         ゲーム画面でのAI生成ログ・エラー情報を確実に参照できる
-       - 成功モデルを lastSuccessModel として同キーに記録する
-         （_saveModel と連動）
-
-   v5.7 以前の変更点（維持）:
-     【Fix-H】image 系モデル除外
-     【Fix-G】管理者モデル設定・自動追随・エラー通知機構
-     【Fix-F】FALLBACK_MODEL_CHAIN 優先順位変更
-     【Fix-E】_callApi JSONパースロジック全面改修
-     【Fix-D】コリニア重複対策
-     【Fix-A/B/C】gridN修正・端点重複除去・プロンプト制約追加
+   v5.9 からの変更点（v5.8 → v5.9）:
+     【Fix-J】アラート種別の細分化
+       - _updateStatus の patch に alertType フィールドを追加
+         'MODEL'  : JSONパース失敗（AIが構造無視した出力）
+         'PROMPT' : JSON取得成功だが有効問題0件（棄却）
+         'LEVEL'  : 全試行後、有効問題数が need の 60% 以下（3/5以下）
+       - generateProblems の戻り値に validCount を付与し、
+         app.js 側で LEVEL アラートを判定できるようにする
+       - アラートログ用に rawJson（AIの生出力）を _updateStatus へ渡す
 ===================================================================== */
 
 const _G = (() => {
@@ -34,7 +27,9 @@ const NO_MIME_CACHE_TTL      = 7 * 24 * 60 * 60 * 1000;
 const LIVE_MODELS_CACHE_KEY  = 'gemini_live_models_v1';
 const LIVE_MODELS_CACHE_TTL  = 60 * 60 * 1000;
 const ADMIN_CHAIN_KEY        = 'gemini_admin_chain_v1';
-const ADMIN_STATUS_KEY       = 'gemini_admin_status_v1'; // 【Fix-I】admin.html 共有用
+const ADMIN_STATUS_KEY       = 'gemini_admin_status_v1';
+const ALERT_LOG_KEY          = 'gemini_alert_log_v1'; // 【Fix-J】アラートログ用
+const ALERT_LOG_MAX          = 100;                    // 最大保持件数
 
 const FALLBACK_MODEL_CHAIN = [
   'gemini-2.5-flash-lite',
@@ -42,7 +37,7 @@ const FALLBACK_MODEL_CHAIN = [
   'gemini-2.5-flash'
 ];
 
-const EXCLUDED_KEYWORDS  = ['pro', 'image']; // Fix-H: image 除外追加済み
+const EXCLUDED_KEYWORDS  = ['pro', 'image'];
 const PREFERRED_KEYWORDS = ['flash-lite', 'flash'];
 
 const FETCH_TIMEOUT_MS       = 8000;
@@ -193,14 +188,8 @@ function _setNoMimeCache(model){
 /* ====================================================================
    § 7. モデルキャッシュ・ライブ取得・チェーン構築
 ==================================================================== */
-
-/**
- * 【Fix-I】成功モデルを MODEL_CACHE_KEY と ADMIN_STATUS_KEY の
- * 両方に記録する。admin.html 側でも直近成功モデルを表示できる。
- */
 function _saveModel(model){
   try{localStorage.setItem(MODEL_CACHE_KEY,JSON.stringify({model,ts:Date.now()}));}catch(_){}
-  // admin.html 共有ステータスにも lastSuccessModel を更新
   try{
     const prev=JSON.parse(localStorage.getItem(ADMIN_STATUS_KEY)||'{}');
     localStorage.setItem(ADMIN_STATUS_KEY,JSON.stringify({...prev,lastSuccessModel:model,lastSuccessTs:Date.now()}));
@@ -284,6 +273,37 @@ async function _buildEffectiveChain(apiKey){
   const chain=[...alive,...supplements];
   return{chain:chain.length>0?chain:FALLBACK_MODEL_CHAIN,needsRedo:false,liveModels};
 }
+
+/* ====================================================================
+   § 8. 【Fix-J】アラートログ管理
+==================================================================== */
+
+/**
+ * アラートログを localStorage に追記する。
+ * admin.js の renderAlertLog() が読み込んで表示する。
+ *
+ * @param {string} alertType  - 'MODEL' | 'PROMPT' | 'LEVEL' | その他
+ * @param {string} message    - バナーに表示したメッセージ
+ * @param {string} model      - 試行したモデル名
+ * @param {*}      rawJson    - AIの生出力（null可）
+ */
+function _appendAlertLog(alertType, message, model, rawJson){
+  try{
+    const entries = JSON.parse(localStorage.getItem(ALERT_LOG_KEY)||'[]');
+    entries.push({
+      ts:        Date.now(),
+      alertType,
+      message,
+      model:     model || '',
+      rawJson:   rawJson !== undefined ? rawJson : null
+    });
+    // 上限を超えた古いエントリを切り捨て
+    localStorage.setItem(ALERT_LOG_KEY, JSON.stringify(entries.slice(-ALERT_LOG_MAX)));
+  }catch(_){}
+}
+
+/* アラートログキーを外部公開用に保持 */
+function getAlertLogKey(){ return ALERT_LOG_KEY; }
 
 /* ====================================================================
    § 9. プロンプト生成
@@ -383,33 +403,37 @@ async function _callApi(model,apiKey,prompt,forcePlain=false){
     clearTimeout(tid);
     const isTimeout=e.name==='AbortError';
     console.warn(`[gemini] ${isTimeout?'タイムアウト':'ネットワークエラー'}: ${model}`);
-    return{raw:null,status:isTimeout?408:0};
+    return{raw:null,status:isTimeout?408:0,rawText:null,parseOk:false};
   }
   if(resp.status===400&&useJsonMode){_setNoMimeCache(model);return _callApi(model,apiKey,prompt,true);}
   if(resp.status===404||resp.status===410){
     console.warn(`[gemini] HTTP ${resp.status}: ${model} 廃止の可能性`);
-    return{raw:null,status:resp.status};
+    return{raw:null,status:resp.status,rawText:null,parseOk:false};
   }
-  if(!resp.ok){console.warn(`[gemini] HTTP ${resp.status}: ${model}`);return{raw:null,status:resp.status};}
-  let data;try{data=await resp.json();}catch(e){return{raw:null,status:200};}
+  if(!resp.ok){console.warn(`[gemini] HTTP ${resp.status}: ${model}`);return{raw:null,status:resp.status,rawText:null,parseOk:false};}
+  let data;try{data=await resp.json();}catch(e){return{raw:null,status:200,rawText:null,parseOk:false};}
   const part=data?.candidates?.[0]?.content?.parts?.[0];
   const rawText=part?.text;
   const text=(typeof rawText==='string'&&rawText.trim().length>0)?rawText.trim():null;
   console.log('[gemini] part keys:',part?Object.keys(part):'no part');
   console.log('[gemini] text length:',text!==null?text.length:'null');
   let problems=null;
+  // 【Fix-J】パース成功フラグ: JSON構造が取れたかどうか
+  let parseOk=false;
   if(useJsonMode){
     if(text!==null){
-      try{const p=JSON.parse(text);problems=Array.isArray(p)&&p.length>0?p:_extractJsonArray(text);}
-      catch(e){problems=_extractJsonArray(text);}
+      try{const p=JSON.parse(text);problems=Array.isArray(p)&&p.length>0?p:_extractJsonArray(text);parseOk=(problems!==null);}
+      catch(e){problems=_extractJsonArray(text);parseOk=(problems!==null);}
     }else{
       problems=_extractJsonArray(JSON.stringify(data));
-      if(!problems||problems.length===0){_setNoMimeCache(model);return _callApi(model,apiKey,prompt,true);}
+      parseOk=(problems!==null&&problems.length>0);
+      if(!parseOk){_setNoMimeCache(model);return _callApi(model,apiKey,prompt,true);}
     }
   }else{
     problems=text!==null?_extractJsonArray(text):_extractJsonArray(JSON.stringify(data));
+    parseOk=(problems!==null);
   }
-  return{raw:problems,status:resp.status};
+  return{raw:problems,status:resp.status,rawText:text,parseOk};
 }
 
 /* ====================================================================
@@ -431,27 +455,12 @@ function _processRaw(raw,level,need){
 /* ====================================================================
    § 13. メイン API: generateProblems
 ==================================================================== */
-
-/**
- * 【Fix-I】_updateStatus
- *
- * window._geminiStatus（同一ページ内通知）と
- * localStorage('gemini_admin_status_v1')（admin.html 共有）の
- * 両方にステータスをマージ書き込みする。
- *
- * admin.html は別ページのため window イベントは届かないが、
- * localStorage を定期読み取り or ページ表示時に読み込むことで
- * ゲーム画面でのエラー・成功履歴を確実に参照できる。
- */
 function _updateStatus(patch){
-  // ── ① 同一ページ内: window._geminiStatus + カスタムイベント ──
   try{
     if(!window._geminiStatus)window._geminiStatus={errorCount:0,needsAdminRedo:false};
     Object.assign(window._geminiStatus,patch);
     window.dispatchEvent(new CustomEvent('geminiStatusUpdate',{detail:window._geminiStatus}));
   }catch(_){}
-
-  // ── ② 【Fix-I】別ページ(admin.html)向け: localStorage に永続化 ──
   try{
     const prev=JSON.parse(localStorage.getItem(ADMIN_STATUS_KEY)||'{}');
     const merged={...prev,...patch,lastUpdatedTs:Date.now()};
@@ -462,7 +471,7 @@ function _updateStatus(patch){
 async function generateProblems(level,count=5,apiKey){
   if(!apiKey){
     console.log('[gemini] APIキーなし→フォールバック');
-    return _getFallback(level,count);
+    return{problems:_getFallback(level,count),validCount:0,alertType:null};
   }
   const{chain,needsRedo,liveModels}=await _buildEffectiveChain(apiKey);
   _updateStatus({currentChain:chain,liveModels:liveModels||[]});
@@ -472,20 +481,25 @@ async function generateProblems(level,count=5,apiKey){
   if(chain.length===0){
     const msg='AIモデルが全て利用不可です。管理者設定でモデルを更新してください。';
     _updateStatus({needsAdminRedo:true,lastError:msg});
-    return _getFallback(level,count);
+    return{problems:_getFallback(level,count),validCount:0,alertType:'MODEL'};
   }
+
   const prompt=_buildPrompt(level,count);
   let sessionErrors=0;
+  let collectedValid=[];   // 【Fix-J】全試行での有効問題を蓄積
+  let lastAlertType=null;  // 【Fix-J】最後に発生したアラート種別
+
   for(const model of chain){
     let attempts=0,count429=0;
     console.log(`[gemini] モデル試行: ${model}`);
     while(attempts<MAX_ATTEMPTS_PER_MODEL){
       attempts++;
-      const{raw,status}=await _callApi(model,apiKey,prompt);
+      const{raw,status,rawText,parseOk}=await _callApi(model,apiKey,prompt);
+
       if(status===401||status===403){
         console.error('[gemini] 認証エラー');
         _updateStatus({lastError:'APIキーが無効です。APIキーを確認してください。'});
-        return _getFallback(level,count);
+        return{problems:_getFallback(level,count),validCount:0,alertType:'MODEL'};
       }
       if(status===408||status===0){
         sessionErrors++;
@@ -508,23 +522,75 @@ async function generateProblems(level,count=5,apiKey){
         await new Promise(r=>setTimeout(r,1000*Math.pow(2,count429-1)));
         continue;
       }
-      const valid=_processRaw(raw,level,count);
-      if(valid.length>=count){
-        _saveModel(model); // Fix-I: ADMIN_STATUS_KEY にも lastSuccessModel を書き込む
-        console.log(`[gemini] ${model} 成功: ${valid.length}件`);
-        return valid.slice(0,count);
+
+      // 【Fix-J】パース判定: JSONが構造として取れなかった場合 → MODEL アラート
+      if(!parseOk){
+        const msg=`CHANGE AI model`;
+        sessionErrors++;
+        lastAlertType='MODEL';
+        _updateStatus({errorCount:(window._geminiStatus?.errorCount||0)+1,lastError:msg});
+        _appendAlertLog('MODEL', msg, model, rawText);
+        break;
       }
+
+      const valid=_processRaw(raw,level,count);
+
+      // 【Fix-J】有効問題0件: PROMPT アラート
+      if(valid.length===0){
+        const msg=`CHECK AI prompt or CHANGE AI model`;
+        sessionErrors++;
+        lastAlertType='PROMPT';
+        _updateStatus({errorCount:(window._geminiStatus?.errorCount||0)+1,lastError:msg});
+        _appendAlertLog('PROMPT', msg, model,
+          raw ? JSON.stringify(raw).slice(0,2000) : rawText);
+        break;
+      }
+
+      // 有効問題が得られた場合は蓄積
+      for(const p of valid){
+        if(collectedValid.length<count)collectedValid.push(p);
+      }
+
+      if(collectedValid.length>=count){
+        _saveModel(model);
+        console.log(`[gemini] ${model} 成功: ${collectedValid.length}件`);
+        // 5問揃ったらアラートなしで返す
+        return{problems:collectedValid.slice(0,count),validCount:collectedValid.length,alertType:null};
+      }
+
       sessionErrors++;
       _updateStatus({errorCount:(window._geminiStatus?.errorCount||0)+1,
         lastError:`有効問題不足 (${model}: ${valid.length}/${count})`});
+      break; // 次のモデルへ
     }
+
     if(sessionErrors>=ERROR_NOTIFY_THRESHOLD){
       _updateStatus({needsAdminRedo:true,
         lastError:`エラーが${sessionErrors}回発生しました。モデル設定の確認を推奨します。`});
     }
   }
+
+  // 【Fix-J】全チェーン試行後: 有効問題が1〜3件 → LEVEL アラート
+  if(collectedValid.length>0&&collectedValid.length<=Math.floor(count*0.6)){
+    const msg=`CONSIDER changing the level limits`;
+    lastAlertType='LEVEL';
+    _updateStatus({lastError:msg});
+    _appendAlertLog('LEVEL', msg, chain[chain.length-1]||'',
+      `validCount=${collectedValid.length}/${count}`);
+    // 不足分はフォールバックで補完
+    const supplement=_getFallback(level,count-collectedValid.length);
+    return{problems:[...collectedValid,...supplement],validCount:collectedValid.length,alertType:'LEVEL'};
+  }
+
+  // 有効問題が0件 または 4件以上5件未満（4件）の場合
+  if(collectedValid.length>0){
+    // 4件: アラートなしで不足補完
+    const supplement=_getFallback(level,count-collectedValid.length);
+    return{problems:[...collectedValid,...supplement],validCount:collectedValid.length,alertType:lastAlertType};
+  }
+
   console.warn('[gemini] 全モデル失敗→フォールバック');
-  return _getFallback(level,count);
+  return{problems:_getFallback(level,count),validCount:0,alertType:lastAlertType||'MODEL'};
 }
 
 /* ====================================================================
@@ -541,7 +607,8 @@ return{
   generateProblems,
   saveApiKey,loadApiKey,clearModelCache,
   saveAdminChain,loadAdminChain,clearAdminChain,
-  fetchLiveModels:_fetchLiveModels
+  fetchLiveModels:_fetchLiveModels,
+  getAlertLogKey   // 【Fix-J】admin.js がキー文字列を参照できるよう公開
 };
 
 })();
@@ -554,3 +621,4 @@ const saveAdminChain   = _G.saveAdminChain;
 const loadAdminChain   = _G.loadAdminChain;
 const clearAdminChain  = _G.clearAdminChain;
 const fetchLiveModels  = _G.fetchLiveModels;
+const getAlertLogKey   = _G.getAlertLogKey; // 【Fix-J】
