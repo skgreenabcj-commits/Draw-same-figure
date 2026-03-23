@@ -192,6 +192,45 @@
       </div>
     </section>
 
+    <!-- ==============================
+     セクション 4: アラートログ（v1.1追加）
+     ============================== -->
+<section class="admin-section" id="section-alerts">
+  <h2 class="admin-section-title">
+    <i class="fa fa-bell"></i> アラートログ
+  </h2>
+  <div class="admin-section-body">
+    <p class="admin-desc">
+      ゲーム画面でAI生成中に発生したアラートを記録します。<br>
+      発生日時・アラート種別・使用モデル・AIのJSON出力を確認できます。
+    </p>
+
+    <!-- アラート件数カード -->
+    <div class="admin-status-cards" style="margin-bottom:12px">
+      <div class="status-card">
+        <div class="status-card-icon status-card-icon--error">
+          <i class="fa fa-bell"></i>
+        </div>
+        <div class="status-card-body">
+          <div class="status-card-value" id="val-alert-count">—</div>
+          <div class="status-card-label">総アラート件数</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- アラートログ一覧 -->
+    <div class="admin-log-header">
+      <span class="admin-log-title">アラート履歴</span>
+      <button id="btn-clear-alert-log" class="admin-btn-text">
+        <i class="fa fa-trash"></i> アラートをクリア
+      </button>
+    </div>
+    <div id="alert-log-list" class="admin-log-list alert-log-list">
+      <p class="admin-log-empty">アラートはまだありません。</p>
+    </div>
+  </div>
+</section>
+    
   </div><!-- /.admin-page -->
 
   <!-- gemini.js のみ読み込む（app.js / canvas.js 不要） -->
