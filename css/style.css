@@ -385,14 +385,14 @@ button:active { transform: scale(.95); }
 .hidden { display: none !important; }
 
 /* ========================================
-   エラー・通知バナー
-   （管理者モデル設定UIはadmin.htmlへ移管 — v2.4以降）
+   エラー・通知バナー（× 閉じボタン付き）
+   v2.5 以降
    ======================================== */
 
 .model-error-banner {
   position: fixed;
   top: 0; left: 0; right: 0;
-  padding: 10px 20px;
+  padding: 8px 48px 8px 20px; /* 右側に × ボタン分の余白 */
   font-size: 13px;
   font-family: var(--font);
   font-weight: 700;
@@ -401,18 +401,46 @@ button:active { transform: scale(.95); }
   z-index: 9999;
   transition: background .3s;
   line-height: 1.5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
-.model-error-banner--error {
-  background: #c62828;
-  color: #fff;
-}
+.model-error-banner--error { background: #c62828; color: #fff; }
 .model-error-banner--error:hover { background: #b71c1c; }
+.model-error-banner--info  { background: #1565c0; color: #fff; }
+.model-error-banner--info:hover  { background: #0d47a1; }
 
-.model-error-banner--info {
-  background: #1565c0;
-  color: #fff;
+/* バナー本文テキスト */
+.banner-text { flex: 1; text-align: center; }
+
+/* × 閉じボタン */
+.banner-close {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  color: inherit;
+  font-size: 18px;
+  font-weight: 900;
+  line-height: 1;
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: 4px;
+  opacity: 0.75;
+  transition: opacity .15s, background .15s;
 }
-.model-error-banner--info:hover { background: #0d47a1; }
+.banner-close:hover {
+  opacity: 1;
+  background: rgba(255,255,255,.2);
+}
+
+@media (max-width: 600px) {
+  .model-error-banner { font-size: 11px; padding: 7px 40px 7px 12px; }
+  .banner-close { font-size: 16px; right: 8px; }
+}
+
 
 /* ===== Responsive — タブレット ===== */
 @media (min-width: 601px) and (max-width: 900px) {
