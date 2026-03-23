@@ -339,6 +339,79 @@
 .admin-log-entry--error .admin-log-msg { color: #ef9a9a; }
 .admin-log-entry--warn  .admin-log-msg { color: #ffe082; }
 
+/* ========================================================
+   アラートログ（v1.1追加）
+   ======================================================== */
+
+.alert-log-list {
+  max-height: 480px;
+  overflow-y: auto;
+  background: #1a1a2e;
+  border-radius: 10px;
+  padding: 10px;
+  font-family: 'Courier New', monospace;
+}
+
+.alert-log-entry {
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  border-left: 4px solid #555;
+  background: #22223a;
+}
+.alert-log-entry--model  { border-left-color: #ef5350; }
+.alert-log-entry--prompt { border-left-color: #ffcc02; }
+.alert-log-entry--level  { border-left-color: #64b5f6; }
+
+.alert-log-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+.alert-log-ts    { font-size: .72rem; color: #888; white-space: nowrap; }
+.alert-log-model { font-size: .72rem; color: #aaa; white-space: nowrap; flex: 1; text-align: right; }
+.alert-log-msg   { font-size: .82rem; color: #eee; margin-bottom: 6px; word-break: break-all; }
+
+/* アラート種別バッジ */
+.alert-type-badge {
+  font-size: .7rem;
+  font-weight: 800;
+  padding: 2px 8px;
+  border-radius: 12px;
+  white-space: nowrap;
+}
+.alert-type--model  { background: #b71c1c; color: #fff; }
+.alert-type--prompt { background: #f9a825; color: #1a1a2e; }
+.alert-type--level  { background: #1565c0; color: #fff; }
+.alert-type--other  { background: #444; color: #ccc; }
+
+/* JSON出力の折りたたみ */
+.alert-log-raw { margin-top: 4px; }
+.alert-log-raw-summary {
+  font-size: .75rem;
+  color: #64b5f6;
+  cursor: pointer;
+  user-select: none;
+  padding: 2px 0;
+}
+.alert-log-raw-summary:hover { color: #90caf9; }
+.alert-log-raw-pre {
+  margin-top: 6px;
+  padding: 8px;
+  background: #111128;
+  border-radius: 6px;
+  font-size: .72rem;
+  color: #a5d6a7;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+
 /* ── レスポンシブ ── */
 @media (max-width: 600px) {
   .admin-section-body { padding: 14px 14px 16px; }
