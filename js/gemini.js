@@ -1,13 +1,10 @@
-'use strict';
-
-/* =====================================================================
- gemini.js  v5.9.1
-  変更点:
-    - BUG-A: _updateStatus の成功パッチ時に alertType: null を明示セット
-    - BUG-B: LEVEL アラート閾値を TARGET_COUNT 比率（60%未満）で計算
- ===================================================================== */
-
-const _G = (() => {
+/**
+ * gemini.js  v5.9.2
+ * 変更点 (v5.9.1 → v5.9.2):
+ *   - NOTE-A: LEVEL_ALERT_RATIO を 0.6 → 0.61 に変更
+ *             validCount <= 3 / TARGET_COUNT=5 の設計意図と一致させる
+ *             （0.6 では validCount<=2 相当だったため1問分ずれていた）
+ */
 
 /* ============================================================
    §0. 定数
@@ -24,9 +21,12 @@ const API_KEY_STORAGE   = 'gemini_api_key';
 
 const MODEL_CACHE_TTL   = 60 * 60 * 1000; // 1時間
 const ALERT_LOG_MAX     = 100;
-const TARGET_COUNT      = 5;               // 1セッションの目標問題数
-// BUG-B 修正: 比率定数を分離
-const LEVEL_ALERT_RATIO = 0.6;            // validCount / TARGET_COUNT がこれ未満で LEVEL アラート
+const TARGET_COUNT      = 5;
+
+// NOTE-A 修正: 0.6 → 0.61（validCount<=3 / TARGET_COUNT=5 の設計意図と一致）
+// 0.60 だと validCount/5 < 0.60 → validCount <= 2 になってしまう
+// 0.61 だと validCount/5 < 0.61 → validCount <= 3 になり設計通り
+const LEVEL_ALERT_RATIO = 0.61;
 
 const EXCLUDED_KEYWORDS  = ['pro', 'image'];
 const PREFERRED_KEYWORDS = ['flash-lite', 'flash'];
@@ -77,14 +77,9 @@ let _status = {
   lastError        : null,
   lastErrorTs      : null,
   needsUpdate      : false,
-  alertType        : null   // BUG-A 修正: 常に存在するフィールドとして初期化
+  alertType        : null
 };
 
-/**
- * BUG-A 修正:
- * - 成功時は patch に alertType: null を必ず含める
- * - _updateStatus はマージ前に alertType を null リセットしてから上書き
- */
 function _updateStatus(patch) {
   // alertType は明示的に渡されない限り null にリセット（残留防止）
   _status = Object.assign({}, _status, { alertType: null }, patch);
@@ -109,7 +104,7 @@ function _saveModel(model) {
     lastSuccessModel : model,
     lastSuccessTs    : new Date().toISOString(),
     needsUpdate      : false,
-    alertType        : null  // BUG-A 修正: 成功時は明示的に null
+    alertType        : null
   });
   try {
     localStorage.setItem(MODEL_CACHE_KEY, JSON.stringify({
@@ -320,13 +315,19 @@ async function _callApi(model, prompt, apiKey) {
 /**
  * @returns {{ problems: Array, validCount: number, alertType: string|null }}
  *
- * BUG-B 修正:
- *   LEVEL アラート判定を固定値 <=3 から
- *   validCount / TARGET_COUNT < LEVEL_ALERT_RATIO（0.6）に変更
+ * NOTE-A 修正済み:
+ *   LEVEL アラート条件 = validCount / TARGET_COUNT < 0.61
+ *   → TARGET_COUNT=5 のとき validCount <= 3 と等価（設計通り）
  */
 async function generateProblems(level = 0) {
   const apiKey = loadApiKey();
-  if (!apiKey) return { problems: _FALLBACK_BANK.slice(0, TARGET_COUNT), validCount: 0, alertType: null };
+  if (!apiKey) {
+    return {
+      problems   : _FALLBACK_BANK.slice(0, TARGET_COUNT),
+      validCount : 0,
+      alertType  : null
+    };
+  }
 
   const chain  = _buildEffectiveChain();
   const prompt = _makePrompt(level);
@@ -340,15 +341,17 @@ async function generateProblems(level = 0) {
     lastModel = model;
     try {
       const { rawText, jsonStr, parseOk } = await _callApi(model, prompt, apiKey);
-      lastRawJson = rawText;
-
-      // BUG-A 修正: 試行ごとに alertType をリセット
-      lastAlertType = null;
+      lastRawJson   = rawText;
+      lastAlertType = null; // 試行ごとにリセット
 
       if (!parseOk) {
-        // JSON 構造なし → MODEL アラート
         lastAlertType = 'MODEL';
-        _updateStatus({ errorCount: (_status.errorCount ?? 0) + 1, lastError: 'JSON parse failed', alertType: 'MODEL' });
+        _updateStatus({
+          errorCount : (_status.errorCount ?? 0) + 1,
+          lastError  : 'JSON parse failed',
+          lastErrorTs: new Date().toISOString(),
+          alertType  : 'MODEL'
+        });
         _appendAlertLog({ alertType: 'MODEL', message: 'JSON parse failed', model, rawJson: rawText });
         continue;
       }
@@ -356,14 +359,24 @@ async function generateProblems(level = 0) {
       let parsed;
       try { parsed = JSON.parse(jsonStr); } catch (_) {
         lastAlertType = 'MODEL';
-        _updateStatus({ errorCount: (_status.errorCount ?? 0) + 1, lastError: 'JSON.parse threw', alertType: 'MODEL' });
+        _updateStatus({
+          errorCount : (_status.errorCount ?? 0) + 1,
+          lastError  : 'JSON.parse threw',
+          lastErrorTs: new Date().toISOString(),
+          alertType  : 'MODEL'
+        });
         _appendAlertLog({ alertType: 'MODEL', message: 'JSON.parse threw', model, rawJson: jsonStr });
         continue;
       }
 
       if (!Array.isArray(parsed) || parsed.length === 0) {
         lastAlertType = 'PROMPT';
-        _updateStatus({ errorCount: (_status.errorCount ?? 0) + 1, lastError: 'Empty array', alertType: 'PROMPT' });
+        _updateStatus({
+          errorCount : (_status.errorCount ?? 0) + 1,
+          lastError  : 'Empty array',
+          lastErrorTs: new Date().toISOString(),
+          alertType  : 'PROMPT'
+        });
         _appendAlertLog({ alertType: 'PROMPT', message: 'Empty array from model', model, rawJson: jsonStr });
         continue;
       }
@@ -371,22 +384,36 @@ async function generateProblems(level = 0) {
       const valid = parsed.map(_normalize).filter(p => _validate(p, level));
 
       if (valid.length === 0) {
-        // 有効問題 0 件 → PROMPT アラート
         lastAlertType = 'PROMPT';
-        _updateStatus({ errorCount: (_status.errorCount ?? 0) + 1, lastError: 'No valid problems', alertType: 'PROMPT' });
-        _appendAlertLog({ alertType: 'PROMPT', message: 'No valid problems in output', model, rawJson: jsonStr });
+        _updateStatus({
+          errorCount : (_status.errorCount ?? 0) + 1,
+          lastError  : 'No valid problems',
+          lastErrorTs: new Date().toISOString(),
+          alertType  : 'PROMPT'
+        });
+        _appendAlertLog({
+          alertType : 'PROMPT',
+          message   : 'No valid problems in output',
+          model,
+          rawJson   : jsonStr
+        });
         continue;
       }
 
       // 有効問題あり → 成功
       collectedValid = collectedValid.concat(valid);
-      _saveModel(model); // BUG-A 修正: alertType: null を内部で明示セット済み
+      _saveModel(model); // 内部で alertType: null を明示セット済み
 
       if (collectedValid.length >= TARGET_COUNT) break;
 
     } catch (err) {
       lastAlertType = 'MODEL';
-      _updateStatus({ errorCount: (_status.errorCount ?? 0) + 1, lastError: err.message, alertType: 'MODEL' });
+      _updateStatus({
+        errorCount : (_status.errorCount ?? 0) + 1,
+        lastError  : err.message,
+        lastErrorTs: new Date().toISOString(),
+        alertType  : 'MODEL'
+      });
       _appendAlertLog({ alertType: 'MODEL', message: err.message, model, rawJson: lastRawJson });
     }
   }
@@ -396,10 +423,14 @@ async function generateProblems(level = 0) {
 
   if (validCount === 0) {
     // 完全失敗 → フォールバック
-    return { problems: _FALLBACK_BANK.slice(0, TARGET_COUNT), validCount: 0, alertType: lastAlertType };
+    return {
+      problems   : _FALLBACK_BANK.slice(0, TARGET_COUNT),
+      validCount : 0,
+      alertType  : lastAlertType
+    };
   }
 
-  // BUG-B 修正: 比率で LEVEL アラート判定
+  // NOTE-A 修正済み: 比率 0.61 で validCount<=3 を正しく検出
   const ratio = validCount / TARGET_COUNT;
   if (ratio < LEVEL_ALERT_RATIO) {
     const alertType = 'LEVEL';
@@ -411,13 +442,19 @@ async function generateProblems(level = 0) {
       rawJson : lastRawJson
     });
     const result = collectedValid.slice(0, TARGET_COUNT);
-    while (result.length < TARGET_COUNT) result.push(_FALLBACK_BANK[result.length % _FALLBACK_BANK.length]);
+    while (result.length < TARGET_COUNT) {
+      result.push(_FALLBACK_BANK[result.length % _FALLBACK_BANK.length]);
+    }
     return { problems: result, validCount, alertType };
   }
 
-  // BUG-A 修正: 成功時は alertType を null で明示クリア
+  // 成功: alertType を null で明示クリア
   _updateStatus({ alertType: null });
-  return { problems: collectedValid.slice(0, TARGET_COUNT), validCount, alertType: null };
+  return {
+    problems   : collectedValid.slice(0, TARGET_COUNT),
+    validCount,
+    alertType  : null
+  };
 }
 
 /* ============================================================
