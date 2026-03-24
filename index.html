@@ -1,169 +1,159 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>ずけい れんしゅう 🐱</title>
-  <link rel="stylesheet" href="css/style.css" />
-  <link href="https://fonts.googleapis.com/css2?family=Kosugi+Maru&family=M+PLUS+Rounded+1c:wght@400;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css" />
-  <link rel="icon" href="data:,">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>線交差パズル</title>
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 </head>
 <body>
 
-  <!-- エラー・通知バナー（クリックでadmin.htmlを開く） -->
-<div id="model-error-banner" style="display:none;">
-  <span class="banner-text"></span>
-  <button class="banner-close" aria-label="Close">✕</button>
-</div>
+  <!-- エラー/通知バナー -->
+  <!-- BUG-D 修正済み構造: banner-text + banner-close -->
+  <div id="model-error-banner" style="display:none;">
+    <span class="banner-text"></span>
+    <button class="banner-close" aria-label="Close">✕</button>
+  </div>
 
-
-  <!-- ===== スタート画面 ===== -->
+  <!-- ========== スタート画面 ========== -->
   <div id="screen-start" class="screen active">
     <div class="start-wrapper">
-      <img src="images/cat-mascot.png" alt="ねこキャラクター" class="start-cat" />
-      <h1 class="start-title">ずけい れんしゅう</h1>
-      <p class="start-sub">おなじずけいを かいてみよう！</p>
 
-      <div class="level-select">
-        <p class="level-label">レベルを えらんでね</p>
+      <h1 class="app-title">線交差パズル</h1>
+      <p class="app-sub">AIが毎回新しい問題を生成します</p>
+
+      <!-- レベル選択 -->
+      <div class="level-selector">
+        <p class="level-label">難易度を選んでください</p>
         <div class="level-buttons">
-          <button class="level-btn" data-level="0">
-            <span class="lv-icon">🌟</span>
-            <span class="lv-name">レベル０</span>
-            <span class="lv-desc">4×4 ・ さいしょの１ぽん</span>
-          </button>
-          <button class="level-btn" data-level="1">
-            <span class="lv-icon">⭐</span>
-            <span class="lv-name">レベル１</span>
-            <span class="lv-desc">4×4 ・ ヒントあり</span>
-          </button>
-          <button class="level-btn" data-level="2">
-            <span class="lv-icon">⭐⭐</span>
-            <span class="lv-name">レベル２</span>
-            <span class="lv-desc">4×4 ・ ぜんぶかく</span>
-          </button>
-          <button class="level-btn" data-level="3">
-            <span class="lv-icon">⭐⭐⭐</span>
-            <span class="lv-name">レベル３</span>
-            <span class="lv-desc">5×5 ・ もっとむずかしい</span>
-          </button>
+          <button class="btn-level" data-level="0">Lv.1<br><small>かんたん</small></button>
+          <button class="btn-level" data-level="1">Lv.2<br><small>ふつう</small></button>
+          <button class="btn-level" data-level="2">Lv.3<br><small>むずかしい</small></button>
+          <button class="btn-level" data-level="3">Lv.4<br><small>激むず</small></button>
         </div>
       </div>
 
-      <!-- Gemini API Key 入力 -->
-      <div class="api-section">
-        <button id="btn-toggle-api" class="btn-text-small">
-          <i class="fa fa-robot"></i> AIで問題を作る（Gemini APIキー）
+      <!-- ERR-1 修正: id="btn-toggle-api" を正しく設定 -->
+      <!-- ERR-2 修正: id="btn-start" を正しく設定 -->
+      <div class="start-actions">
+        <button id="btn-start" class="btn-start">はじめる</button>
+
+        <button id="btn-toggle-api" class="btn-small">
+          <i class="fa-solid fa-key"></i> AIで問題を作る（Gemini APIキー）
         </button>
-        <div id="api-key-panel" class="hidden">
-          <input id="input-api-key" type="password" placeholder="Gemini API Key を入力..." />
-          <button id="btn-save-api" class="btn-small">保存</button>
-          <p class="api-note">APIキーはブラウザ内にのみ保存されます</p>
+
+        <!-- APIキー入力パネル（初期非表示） -->
+        <div id="api-key-panel" style="display:none;" class="api-key-panel">
+          <input
+            id="input-api-key"
+            type="password"
+            placeholder="Gemini API キーを入力"
+            class="api-key-input"
+            autocomplete="off"
+          >
+          <button id="btn-save-api" class="btn-small btn-primary">
+            <i class="fa-solid fa-floppy-disk"></i> 保存
+          </button>
         </div>
-        <!-- 管理者設定ボタン → admin.html を別タブで開く -->
-        <button id="btn-admin-model" class="btn-text-small admin-model-btn">
-          <i class="fa fa-cog"></i> AIモデル設定（管理者）
+
+        <button id="btn-admin-model" class="btn-admin-link">
+          <i class="fa-solid fa-gear"></i> 管理者設定
         </button>
       </div>
 
-      <button id="btn-start" class="btn-start" disabled>はじめる！</button>
     </div>
   </div>
 
-  <!-- ===== 問題画面 ===== -->
+  <!-- ========== ゲーム画面 ========== -->
   <div id="screen-game" class="screen">
-    <header class="game-header">
-      <button id="btn-home" class="btn-icon"><i class="fa fa-home"></i></button>
+    <div class="game-header">
+      <button id="btn-home" class="btn-icon">
+        <i class="fa-solid fa-house"></i>
+      </button>
       <div class="progress-area">
-        <span id="progress-text">1 / 5もん</span>
-        <div class="progress-bar-bg">
-          <div id="progress-bar" class="progress-bar-fill" style="width:20%"></div>
-        </div>
+        <span id="progress-text">1 / 5</span>
       </div>
-      <div class="score-area"><span id="score-text">⭐ 0</span></div>
-    </header>
+      <div class="score-area">
+        スコア: <span id="score-val">0</span>
+      </div>
+    </div>
 
-    <main class="game-main">
-      <div class="problem-row">
-        <div class="panel">
-          <p class="panel-label">みほん</p>
-          <div class="grid-outer" id="grid-outer-model">
-            <div class="col-header" id="col-header-model"></div>
-            <div class="grid-body">
-              <div class="row-header" id="row-header-model"></div>
-              <div class="canvas-wrap">
-                <canvas id="canvas-model"></canvas>
-              </div>
-            </div>
-          </div>
-        </div>
-        <div class="panel">
-          <p class="panel-label">かいてみよう</p>
-          <div class="grid-outer" id="grid-outer-answer">
-            <div class="col-header" id="col-header-answer"></div>
-            <div class="grid-body">
-              <div class="row-header" id="row-header-answer"></div>
-              <div class="canvas-wrap" id="answer-wrap">
-                <canvas id="canvas-answer"></canvas>
-                <canvas id="canvas-overlay"></canvas>
-              </div>
-            </div>
-          </div>
-        </div>
+    <div class="game-main">
+      <!-- お手本キャンバス -->
+      <div class="canvas-wrapper">
+        <p class="canvas-label">お手本</p>
+        <canvas id="canvas-model"></canvas>
       </div>
 
-      <p id="hint-msg" class="hint-msg hidden">
-        のこり<span id="hint-remain"></span>ほんのせんをかこう！
-      </p>
-
-      <div class="action-row">
-        <button id="btn-clear"  class="btn-sub"><i class="fa fa-eraser"></i> ぜんぶけす</button>
-        <button id="btn-check"  class="btn-primary"><i class="fa fa-check"></i> こたえあわせ</button>
-        <button id="btn-undo"   class="btn-sub"><i class="fa fa-undo"></i> １つもどす</button>
-      </div>
-    </main>
-
-    <div id="feedback-overlay" class="feedback-overlay hidden">
-      <div id="feedback-box" class="feedback-box">
-        <div id="feedback-wrong" class="hidden">
-          <p class="fb-title wrong">もう すこし！</p>
-          <p class="fb-desc">みどりせんが　ただしい　せんだよ</p>
-          <canvas id="canvas-wrong"></canvas>
-          <button id="btn-next-wrong" class="btn-primary mt16">つぎへ <i class="fa fa-arrow-right"></i></button>
-        </div>
-        <div id="feedback-correct" class="hidden">
-          <img src="images/gotit.png" alt="せいかい！" class="gotit-img" />
-          <p class="fb-title correct" id="praise-text"></p>
-          <button id="btn-next-correct" class="btn-primary mt16">つぎへ <i class="fa fa-arrow-right"></i></button>
+      <!-- 解答キャンバス -->
+      <div class="canvas-wrapper">
+        <p class="canvas-label">あなたの解答</p>
+        <div class="canvas-answer-wrap">
+          <canvas id="canvas-answer"></canvas>
+          <canvas id="canvas-overlay"></canvas>
         </div>
       </div>
     </div>
+
+    <p id="hint-msg" class="hint-msg"></p>
+
+    <div class="action-row">
+      <button id="btn-clear" class="btn-sub">
+        <i class="fa-solid fa-trash"></i> クリア
+      </button>
+      <button id="btn-undo" class="btn-sub">
+        <i class="fa-solid fa-rotate-left"></i> 戻す
+      </button>
+      <button id="btn-check" class="btn-primary">
+        <i class="fa-solid fa-check"></i> 答え合わせ
+      </button>
+      <button id="btn-next" class="btn-sub">
+        <i class="fa-solid fa-forward"></i> 次へ
+      </button>
+    </div>
+
+    <!-- 正解フィードバック -->
+    <div id="feedback-correct" class="feedback-overlay correct" style="display:none;">
+      <div class="feedback-title">🎉 正解！</div>
+      <div class="feedback-desc" id="praise-text">Great!</div>
+    </div>
+
+    <!-- 不正解フィードバック -->
+    <div id="feedback-wrong" class="feedback-overlay wrong" style="display:none;">
+      <div class="feedback-title">❌ 残念！</div>
+      <div class="feedback-desc">もう一度挑戦！</div>
+    </div>
   </div>
 
-  <!-- ===== 結果画面 ===== -->
+  <!-- ========== リザルト画面 ========== -->
   <div id="screen-result" class="screen">
     <div class="result-wrapper">
-      <img src="images/gotit.png" alt="おわり" class="result-cat" />
-      <h2 class="result-title">おわったよ！</h2>
-      <p class="result-score-label">せいかい</p>
-      <p class="result-score"><span id="final-score">0</span> / 5もん</p>
-      <p id="result-msg" class="result-msg"></p>
-      <div class="result-buttons">
-        <button id="btn-retry"       class="btn-primary"><i class="fa fa-redo"></i> もういちど</button>
-        <button id="btn-result-home" class="btn-sub"><i class="fa fa-home"></i> ホームへ</button>
+      <h2 class="result-title">結果発表</h2>
+      <div class="result-score-wrap">
+        <span id="result-score" class="result-score">0 / 5</span>
+      </div>
+      <div class="result-actions">
+        <button id="btn-retry" class="btn-primary">
+          <i class="fa-solid fa-rotate-right"></i> もう一度
+        </button>
+        <button id="btn-result-home" class="btn-sub">
+          <i class="fa-solid fa-house"></i> トップへ
+        </button>
       </div>
     </div>
   </div>
 
-  <!-- AI生成中スピナー -->
-  <div id="loading-overlay" class="loading-overlay hidden">
-    <div class="loading-box">
-      <div class="spinner"></div>
-      <p>AIが問題を作っています…</p>
-    </div>
+  <!-- ローディングオーバーレイ -->
+  <div id="loading-overlay" style="display:none;" class="loading-overlay">
+    <div class="spinner"></div>
+    <p>AIが問題を生成中...</p>
   </div>
 
+  <!-- スクリプト読み込み順序: problems → canvas → gemini → app -->
   <script src="js/problems.js"></script>
   <script src="js/canvas.js"></script>
   <script src="js/gemini.js"></script>
