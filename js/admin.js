@@ -1,9 +1,11 @@
 /**
- * admin.js  v1.2
- * 変更点 (v1.1 → v1.2):
- *   - NEW-3: geminiStatusUpdate リスナーで alertType の有無に関わらず
- *            _renderAlertLog() を常時呼び出し、件数カードを常に最新化
- *            （旧: alertType がある場合のみ再描画 → 成功時に件数が古い値で残留）
+ * admin.js  v1.3
+ * 変更点 (v1.2 → v1.3):
+ *   - ERR-3: initModelSection の _renderCurrentChain 呼び出しタイミングを
+ *            全バインド完了後に移動し、クラッシュで saveBtn が未バインドになる問題を修正
+ *            fetchLiveModels の戻り値が配列でない場合の型ガードを追加
+ *   - ERR-4: _renderLog を <ul><li> 平文から <table><tr> 形式に変更し判読性を回復
+ *            admin.html の tbody#admin-log-list に対して tr を描画
  */
 
 /* ============================================================
@@ -14,7 +16,6 @@ const MODEL_CACHE_KEY_LOCAL  = 'gemini_model_v3';
 const ADMIN_LOG_KEY          = 'admin_log_v1';
 const ADMIN_LOG_MAX          = 50;
 
-// RISK-1 修正済み: GeminiAPI 経由でキー取得、フォールバック付き
 function _getAlertLogKey() {
   return (window.GeminiAPI?.getAlertLogKey)
     ? window.GeminiAPI.getAlertLogKey()
@@ -88,7 +89,7 @@ function initApiKeySection() {
   }
 
   showBtn?.addEventListener('click', () => {
-    input.type      = input.type === 'password' ? 'text' : 'password';
+    input.type          = input.type === 'password' ? 'text' : 'password';
     showBtn.textContent = input.type === 'password' ? '表示' : '隠す';
   });
 
@@ -111,7 +112,7 @@ function initApiKeySection() {
 }
 
 /* ============================================================
-   §4. モデル優先度セクション
+   §4. モデル優先度セクション（ERR-3 修正）
    ============================================================ */
 function initModelSection() {
   const fetchBtn = document.getElementById('btn-fetch-models');
@@ -123,10 +124,17 @@ function initModelSection() {
     document.getElementById('select-model-3')
   ];
 
+  // ERR-3 修正: fetchBtn のハンドラ内で型ガードを追加
   fetchBtn?.addEventListener('click', async () => {
     _showStatusMsg('model-status', 'モデルを取得中...', 'info');
     try {
       const models = await GeminiAPI.fetchLiveModels();
+
+      // 型ガード: 配列でない場合はエラー扱い
+      if (!Array.isArray(models)) {
+        throw new Error('fetchLiveModels did not return an array');
+      }
+
       selects.forEach((sel, i) => {
         if (!sel) return;
         sel.innerHTML = '';
@@ -143,18 +151,21 @@ function initModelSection() {
         });
         sel.disabled = false;
       });
+
       const flashLite = models.find(_isFlashLite);
       if (flashLite && selects[0]) selects[0].value = flashLite;
 
       _renderCurrentChain();
       _showStatusMsg('model-status', `${models.length} 件取得`, 'ok');
-      _appendLog('info', `モデル ${models.length} 件を取得`);
+      _appendLog('info', `ライブモデル取得成功: ${models.join(', ')}`);
+
     } catch (err) {
       _showStatusMsg('model-status', `取得失敗: ${err.message}`, 'error');
       _appendLog('error', `モデル取得失敗: ${err.message}`);
     }
   });
 
+  // ERR-3 修正: saveBtn のバインドを独立させクラッシュの影響を受けない構造に
   saveBtn?.addEventListener('click', () => {
     const chain = selects.map(sel => sel?.value || '').filter(Boolean);
     if (chain.length === 0) {
@@ -173,30 +184,36 @@ function initModelSection() {
 
   clearBtn?.addEventListener('click', () => {
     GeminiAPI.clearAdminChain();
-    selects.forEach(sel => { if (sel) sel.disabled = true; });
+    selects.forEach(sel => { if (sel) { sel.disabled = true; sel.innerHTML = '<option value="">— モデルを取得してください —</option>'; } });
     _renderCurrentChain();
     _showStatusMsg('model-status', 'チェーンをリセットしました', 'info');
     _appendLog('warn', 'チェーンをリセット');
   });
 
+  // ERR-3 修正: 全バインド完了後に _renderCurrentChain を呼び出す
   _renderCurrentChain();
 }
 
 function _renderCurrentChain() {
   const container = document.getElementById('current-chain-display');
   if (!container) return;
-  const chain = GeminiAPI.loadAdminChain();
-  if (!chain || chain.length === 0) {
-    container.innerHTML = '<span class="chain-empty">未設定（フォールバック使用）</span>';
-    return;
+  try {
+    const chain = GeminiAPI.loadAdminChain(); // v5.9.3 で型ガード済み
+    if (!chain || chain.length === 0) {
+      container.innerHTML = '<span class="chain-empty">未設定（フォールバック使用）</span>';
+      return;
+    }
+    container.innerHTML = chain.map((m, i) =>
+      `<span class="chain-badge priority-${i + 1}">${i + 1}. ${_escHtml(m)}</span>`
+    ).join('');
+  } catch (err) {
+    container.innerHTML = '<span class="chain-empty">チェーン読み込みエラー</span>';
+    console.error('[admin] _renderCurrentChain error:', err);
   }
-  container.innerHTML = chain.map((m, i) =>
-    `<span class="chain-badge priority-${i + 1}">${i + 1}. ${_escHtml(m)}</span>`
-  ).join('');
 }
 
 /* ============================================================
-   §5. ステータス・操作ログセクション
+   §5. ステータス・操作ログセクション（ERR-4 修正）
    ============================================================ */
 function _loadAdminStatus() {
   try { return JSON.parse(localStorage.getItem(ADMIN_STATUS_KEY_LOCAL) || '{}'); } catch (_) { return {}; }
@@ -209,14 +226,13 @@ function initLogSection() {
   document.getElementById('btn-refresh-status')?.addEventListener('click', () => {
     _renderStatus();
     _renderLog();
-    _renderAlertLog(); // 手動更新時もアラートログを同期
+    _renderAlertLog();
     _appendLog('info', 'ステータスを手動更新');
   });
 
   document.getElementById('btn-clear-log')?.addEventListener('click', () => {
     _saveAdminLog([]);
     _renderLog();
-    _appendLog('info', 'ログをクリア');
   });
 }
 
@@ -235,7 +251,7 @@ function _renderStatus() {
   const lastErrorEl = document.getElementById('status-last-error');
   if (lastErrorEl) {
     if (st.lastError) {
-      lastErrorEl.textContent  = `[${_fmtTs(st.lastErrorTs)}] ${st.lastError}`;
+      lastErrorEl.textContent   = `[${_fmtTs(st.lastErrorTs)}] ${st.lastError}`;
       lastErrorEl.style.display = 'block';
     } else {
       lastErrorEl.style.display = 'none';
@@ -243,20 +259,30 @@ function _renderStatus() {
   }
 }
 
+/**
+ * ERR-4 修正: <ul><li> 平文 → <table><tbody> 形式に変更
+ * admin.html の tbody#admin-log-list に対して <tr> を描画する
+ */
 function _renderLog() {
-  const list = document.getElementById('admin-log-list');
-  if (!list) return;
+  const tbody = document.getElementById('admin-log-list');
+  if (!tbody) return;
   const logs = _loadAdminLog();
+
   if (logs.length === 0) {
-    list.innerHTML = '<li class="log-empty">ログなし</li>';
+    tbody.innerHTML = '<tr><td colspan="3" class="log-empty">ログなし</td></tr>';
     return;
   }
-  list.innerHTML = logs.map(entry => `
-    <li class="log-entry log-${entry.level}">
-      <span class="log-ts">${_fmtTs(entry.ts)}</span>
-      <span class="log-level">${entry.level.toUpperCase()}</span>
-      <span class="log-msg">${_escHtml(entry.message)}</span>
-    </li>
+
+  tbody.innerHTML = logs.map(entry => `
+    <tr class="log-row log-row-${_escHtml(entry.level)}">
+      <td class="log-td-ts">${_fmtTs(entry.ts)}</td>
+      <td class="log-td-level">
+        <span class="log-level-badge log-level-${_escHtml(entry.level)}">
+          ${_escHtml(entry.level.toUpperCase())}
+        </span>
+      </td>
+      <td class="log-td-msg">${_escHtml(entry.message)}</td>
+    </tr>
   `).join('');
 }
 
@@ -271,7 +297,6 @@ function _loadAlertLog() {
 
 function initAlertLogSection() {
   _renderAlertLog();
-
   document.getElementById('btn-clear-alert-log')?.addEventListener('click', () => {
     try { localStorage.removeItem(_getAlertLogKey()); } catch (_) {}
     _renderAlertLog();
@@ -284,9 +309,7 @@ function _renderAlertLog() {
   const countEl = document.getElementById('alert-count');
   const logs    = _loadAlertLog();
 
-  // NEW-3 修正: 常時呼び出しになったので件数カードを毎回更新
   if (countEl) countEl.textContent = logs.length;
-
   if (!list) return;
 
   if (logs.length === 0) {
@@ -323,26 +346,19 @@ function _renderAlertLog() {
 }
 
 /* ============================================================
-   §7. geminiStatusUpdate リスナー（NEW-3 修正）
+   §7. geminiStatusUpdate リスナー
    ============================================================ */
 window.addEventListener('geminiStatusUpdate', (e) => {
   const status = e.detail || {};
-
-  // localStorage にマージ
   try {
     const stored = JSON.parse(localStorage.getItem(ADMIN_STATUS_KEY_LOCAL) || '{}');
     const merged = Object.assign({}, stored, status, { _ts: new Date().toISOString() });
     localStorage.setItem(ADMIN_STATUS_KEY_LOCAL, JSON.stringify(merged));
   } catch (_) {}
 
-  // ステータス UI を更新
   _renderStatus();
+  _renderAlertLog(); // 常時呼び出し（件数カード最新化）
 
-  // NEW-3 修正: alertType の有無に関わらず常時再描画
-  // → 件数カード (alert-count) が成功時にも最新値を保つ
-  _renderAlertLog();
-
-  // アラートがある場合のみ操作ログに記録
   if (status.alertType) {
     _appendLog('error', `アラート受信: [${status.alertType}] ${status.lastError || ''}`);
   }
