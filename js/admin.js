@@ -1,11 +1,9 @@
 /**
- * admin.js  v1.1  (完全版)
- * 変更点 (v1.0 → v1.1):
- *   - BUG-C: §5 アラートログセクションを完全実装
- *     - rawJson の <details> 折りたたみ表示
- *     - initAlertLogSection() を DOMContentLoaded 内で呼び出し
- *     - クリアボタン (#btn-clear-alert-log) のイベントバインド
- *   - RISK-1: ALERT_LOG_KEY を GeminiAPI.getAlertLogKey() 経由で取得
+ * admin.js  v1.2
+ * 変更点 (v1.1 → v1.2):
+ *   - NEW-3: geminiStatusUpdate リスナーで alertType の有無に関わらず
+ *            _renderAlertLog() を常時呼び出し、件数カードを常に最新化
+ *            （旧: alertType がある場合のみ再描画 → 成功時に件数が古い値で残留）
  */
 
 /* ============================================================
@@ -16,9 +14,11 @@ const MODEL_CACHE_KEY_LOCAL  = 'gemini_model_v3';
 const ADMIN_LOG_KEY          = 'admin_log_v1';
 const ADMIN_LOG_MAX          = 50;
 
-// RISK-1 修正: ハードコードせず GeminiAPI 経由
+// RISK-1 修正済み: GeminiAPI 経由でキー取得、フォールバック付き
 function _getAlertLogKey() {
-  return (window.GeminiAPI?.getAlertLogKey) ? window.GeminiAPI.getAlertLogKey() : 'gemini_alert_log_v1';
+  return (window.GeminiAPI?.getAlertLogKey)
+    ? window.GeminiAPI.getAlertLogKey()
+    : 'gemini_alert_log_v1';
 }
 
 /* ============================================================
@@ -45,8 +45,8 @@ function _fmtTs(isoStr) {
   if (!isoStr) return '—';
   try {
     return new Date(isoStr).toLocaleString('ja-JP', {
-      year:'numeric', month:'2-digit', day:'2-digit',
-      hour:'2-digit', minute:'2-digit', second:'2-digit'
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit'
     });
   } catch (_) { return isoStr; }
 }
@@ -54,13 +54,21 @@ function _fmtTs(isoStr) {
 function _showStatusMsg(id, msg, type = 'info') {
   const el = document.getElementById(id);
   if (!el) return;
-  el.textContent  = msg;
-  el.className    = `admin-status-msg ${type}`;
+  el.textContent   = msg;
+  el.className     = `admin-status-msg ${type}`;
   el.style.display = 'block';
 }
 
 function _isFlashLite(name) {
   return name.toLowerCase().includes('flash-lite');
+}
+
+function _escHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 }
 
 /* ============================================================
@@ -73,29 +81,28 @@ function initApiKeySection() {
 
   if (!input) return;
 
-  // ロード
   const saved = GeminiAPI.loadApiKey();
   if (saved) {
     input.value = saved;
     _showStatusMsg('apikey-status', 'APIキーが設定されています', 'ok');
   }
 
-  // 表示切替
   showBtn?.addEventListener('click', () => {
-    input.type = input.type === 'password' ? 'text' : 'password';
+    input.type      = input.type === 'password' ? 'text' : 'password';
     showBtn.textContent = input.type === 'password' ? '表示' : '隠す';
   });
 
-  // 保存
   saveBtn?.addEventListener('click', () => {
     const val = input.value.trim();
-    if (!val) { _showStatusMsg('apikey-status', 'APIキーを入力してください', 'warn'); return; }
+    if (!val) {
+      _showStatusMsg('apikey-status', 'APIキーを入力してください', 'warn');
+      return;
+    }
     GeminiAPI.saveApiKey(val);
     _showStatusMsg('apikey-status', '保存しました', 'ok');
     _appendLog('info', 'APIキーを保存しました');
   });
 
-  // キャッシュクリア
   document.getElementById('btn-clear-cache')?.addEventListener('click', () => {
     GeminiAPI.clearModelCache();
     _showStatusMsg('apikey-status', 'モデルキャッシュをクリアしました', 'info');
@@ -107,10 +114,10 @@ function initApiKeySection() {
    §4. モデル優先度セクション
    ============================================================ */
 function initModelSection() {
-  const fetchBtn  = document.getElementById('btn-fetch-models');
-  const saveBtn   = document.getElementById('btn-save-chain');
-  const clearBtn  = document.getElementById('btn-clear-chain');
-  const selects   = [
+  const fetchBtn = document.getElementById('btn-fetch-models');
+  const saveBtn  = document.getElementById('btn-save-chain');
+  const clearBtn = document.getElementById('btn-clear-chain');
+  const selects  = [
     document.getElementById('select-model-1'),
     document.getElementById('select-model-2'),
     document.getElementById('select-model-3')
@@ -130,13 +137,12 @@ function initModelSection() {
         }
         models.forEach(m => {
           const opt = document.createElement('option');
-          opt.value = m;
+          opt.value       = m;
           opt.textContent = _isFlashLite(m) ? `⭐ ${m} (推奨)` : m;
           sel.appendChild(opt);
         });
         sel.disabled = false;
       });
-      // 推奨デフォルト
       const flashLite = models.find(_isFlashLite);
       if (flashLite && selects[0]) selects[0].value = flashLite;
 
@@ -150,15 +156,11 @@ function initModelSection() {
   });
 
   saveBtn?.addEventListener('click', () => {
-    const chain = selects
-      .map(sel => sel?.value || '')
-      .filter(Boolean);
-
+    const chain = selects.map(sel => sel?.value || '').filter(Boolean);
     if (chain.length === 0) {
       _showStatusMsg('model-status', '少なくとも1つのモデルを選択してください', 'warn');
       return;
     }
-    // 重複チェック
     if (new Set(chain).size !== chain.length) {
       _showStatusMsg('model-status', '重複するモデルがあります', 'warn');
       return;
@@ -189,12 +191,12 @@ function _renderCurrentChain() {
     return;
   }
   container.innerHTML = chain.map((m, i) =>
-    `<span class="chain-badge priority-${i + 1}">${i + 1}. ${m}</span>`
+    `<span class="chain-badge priority-${i + 1}">${i + 1}. ${_escHtml(m)}</span>`
   ).join('');
 }
 
 /* ============================================================
-   §5. ステータスセクション
+   §5. ステータス・操作ログセクション
    ============================================================ */
 function _loadAdminStatus() {
   try { return JSON.parse(localStorage.getItem(ADMIN_STATUS_KEY_LOCAL) || '{}'); } catch (_) { return {}; }
@@ -203,11 +205,14 @@ function _loadAdminStatus() {
 function initLogSection() {
   _renderStatus();
   _renderLog();
+
   document.getElementById('btn-refresh-status')?.addEventListener('click', () => {
     _renderStatus();
     _renderLog();
+    _renderAlertLog(); // 手動更新時もアラートログを同期
     _appendLog('info', 'ステータスを手動更新');
   });
+
   document.getElementById('btn-clear-log')?.addEventListener('click', () => {
     _saveAdminLog([]);
     _renderLog();
@@ -230,7 +235,7 @@ function _renderStatus() {
   const lastErrorEl = document.getElementById('status-last-error');
   if (lastErrorEl) {
     if (st.lastError) {
-      lastErrorEl.textContent = `[${_fmtTs(st.lastErrorTs)}] ${st.lastError}`;
+      lastErrorEl.textContent  = `[${_fmtTs(st.lastErrorTs)}] ${st.lastError}`;
       lastErrorEl.style.display = 'block';
     } else {
       lastErrorEl.style.display = 'none';
@@ -256,7 +261,7 @@ function _renderLog() {
 }
 
 /* ============================================================
-   §6. アラートログセクション（BUG-C 完全実装）
+   §6. アラートログセクション
    ============================================================ */
 function _loadAlertLog() {
   try {
@@ -264,13 +269,9 @@ function _loadAlertLog() {
   } catch (_) { return []; }
 }
 
-/**
- * BUG-C 修正: rawJson の折りたたみ表示 / クリアボタンバインド / DOMContentLoaded 内呼び出し
- */
 function initAlertLogSection() {
   _renderAlertLog();
 
-  // クリアボタン
   document.getElementById('btn-clear-alert-log')?.addEventListener('click', () => {
     try { localStorage.removeItem(_getAlertLogKey()); } catch (_) {}
     _renderAlertLog();
@@ -279,10 +280,11 @@ function initAlertLogSection() {
 }
 
 function _renderAlertLog() {
-  const list      = document.getElementById('alert-log-list');
-  const countEl   = document.getElementById('alert-count');
-  const logs      = _loadAlertLog();
+  const list    = document.getElementById('alert-log-list');
+  const countEl = document.getElementById('alert-count');
+  const logs    = _loadAlertLog();
 
+  // NEW-3 修正: 常時呼び出しになったので件数カードを毎回更新
   if (countEl) countEl.textContent = logs.length;
 
   if (!list) return;
@@ -292,14 +294,13 @@ function _renderAlertLog() {
     return;
   }
 
-  list.innerHTML = logs.map((entry, idx) => {
+  list.innerHTML = logs.map(entry => {
     const badgeClass = {
       MODEL  : 'alert-type-model',
       PROMPT : 'alert-type-prompt',
       LEVEL  : 'alert-type-level'
     }[entry.alertType] || 'alert-type-unknown';
 
-    // rawJson の折りたたみ（BUG-C 修正: <details><summary> で実装）
     const rawHtml = entry.rawJson
       ? `<details class="alert-raw-json">
            <summary>RAW JSON を表示</summary>
@@ -310,7 +311,7 @@ function _renderAlertLog() {
     return `
       <li class="alert-log-entry">
         <div class="alert-log-header">
-          <span class="alert-type-badge ${badgeClass}">${entry.alertType || 'UNKNOWN'}</span>
+          <span class="alert-type-badge ${badgeClass}">${_escHtml(entry.alertType || 'UNKNOWN')}</span>
           <span class="alert-log-ts">${_fmtTs(entry.ts)}</span>
         </div>
         <div class="alert-log-model">🤖 ${_escHtml(entry.model || '—')}</div>
@@ -322,39 +323,37 @@ function _renderAlertLog() {
 }
 
 /* ============================================================
-   §7. geminiStatusUpdate リスナー
+   §7. geminiStatusUpdate リスナー（NEW-3 修正）
    ============================================================ */
 window.addEventListener('geminiStatusUpdate', (e) => {
   const status = e.detail || {};
+
+  // localStorage にマージ
   try {
     const stored = JSON.parse(localStorage.getItem(ADMIN_STATUS_KEY_LOCAL) || '{}');
     const merged = Object.assign({}, stored, status, { _ts: new Date().toISOString() });
     localStorage.setItem(ADMIN_STATUS_KEY_LOCAL, JSON.stringify(merged));
   } catch (_) {}
+
+  // ステータス UI を更新
   _renderStatus();
+
+  // NEW-3 修正: alertType の有無に関わらず常時再描画
+  // → 件数カード (alert-count) が成功時にも最新値を保つ
+  _renderAlertLog();
+
+  // アラートがある場合のみ操作ログに記録
   if (status.alertType) {
     _appendLog('error', `アラート受信: [${status.alertType}] ${status.lastError || ''}`);
-    _renderAlertLog();
   }
 });
 
 /* ============================================================
-   §8. ユーティリティ: HTML エスケープ
-   ============================================================ */
-function _escHtml(str) {
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
-/* ============================================================
-   §9. 初期化（BUG-C 修正: DOMContentLoaded 内で initAlertLogSection 呼び出し）
+   §8. 初期化
    ============================================================ */
 document.addEventListener('DOMContentLoaded', () => {
   initApiKeySection();
   initModelSection();
   initLogSection();
-  initAlertLogSection(); // BUG-C 修正: ここで呼び出し確定
+  initAlertLogSection();
 });
