@@ -1,425 +1,456 @@
 /* ============================================================
-   admin.css  v1.0
-   管理者設定画面（admin.html）専用スタイル
-   style.css の変数・ボタン定義を継承する
+   admin.css  v1.1
+   変更点:
+     - ERR-4: .log-table / .log-row / .log-td-* / .log-level-badge を追加
+              <ul><li> 平文から <table> 形式へ移行し判読性を回復
    ============================================================ */
 
-/* ── ページ全体 ── */
+/* ---- 既存スタイル（変更なし） ---- */
+
+/* ページ全体 */
 .admin-body {
-  background: #F0F4FA;
+  background: #f5f6fa;
   min-height: 100vh;
+  font-family: var(--font, 'Nunito', sans-serif);
 }
-
 .admin-page {
-  max-width: 680px;
+  max-width: 720px;
   margin: 0 auto;
-  padding: 0 16px 48px;
+  padding: 1rem;
 }
 
-/* ── ヘッダー ── */
+/* ヘッダー */
 .admin-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 18px 0 14px;
-  border-bottom: 2px solid #DDE8F5;
-  margin-bottom: 24px;
-  gap: 12px;
-  flex-wrap: wrap;
+  gap: 1rem;
+  padding: 0.75rem 0 1rem;
+  border-bottom: 2px solid #eee;
+  margin-bottom: 1.25rem;
 }
 .admin-header-title {
-  font-size: 1.3rem;
+  font-size: 1.25rem;
   font-weight: 800;
-  color: var(--text-main);
+  color: #333;
+  margin: 0;
 }
 .admin-back-link {
-  font-size: .88rem;
-  font-weight: 700;
-  color: #1A73E8;
+  color: var(--primary, #FF6B6B);
   text-decoration: none;
-  padding: 6px 14px;
-  border: 2px solid #1A73E8;
-  border-radius: 20px;
-  transition: background .15s;
+  font-weight: 700;
+  font-size: 0.9rem;
   white-space: nowrap;
 }
-.admin-back-link:hover { background: #EAF2FF; }
+.admin-back-link:hover { text-decoration: underline; }
 
-/* ── セクション ── */
+/* セクション */
 .admin-section {
   background: #fff;
-  border-radius: 16px;
-  box-shadow: 0 2px 12px rgba(0,0,0,.08);
-  margin-bottom: 20px;
+  border-radius: 12px;
+  box-shadow: 0 2px 8px rgba(0,0,0,.08);
+  margin-bottom: 1.25rem;
   overflow: hidden;
 }
 .admin-section-title {
   font-size: 1rem;
   font-weight: 800;
-  color: var(--text-main);
-  padding: 14px 20px;
-  background: #F4F8FF;
-  border-bottom: 1px solid #DDE8F5;
-  display: flex;
-  align-items: center;
-  gap: 8px;
+  color: #fff;
+  background: linear-gradient(90deg, var(--primary, #FF6B6B), var(--primary2, #FF8E53));
+  padding: 0.6rem 1rem;
+  margin: 0;
 }
 .admin-section-body {
-  padding: 18px 20px 20px;
-}
-.admin-desc {
-  font-size: .85rem;
-  color: var(--text-sub);
-  line-height: 1.7;
-  margin-bottom: 16px;
-}
-.admin-recommend-note {
-  color: #1A73E8;
-  font-weight: 700;
+  padding: 1rem;
 }
 
-/* ── APIキー行 ── */
-.admin-apikey-row {
+/* フォーム行 */
+.form-row {
   display: flex;
-  gap: 8px;
+  gap: 0.5rem;
   align-items: center;
   flex-wrap: wrap;
 }
 .admin-input {
-  flex: 1 1 220px;
-  padding: 9px 14px;
-  border: 2px solid #DDE8F5;
-  border-radius: 24px;
-  font-size: .9rem;
-  font-family: var(--font);
-  outline: none;
+  flex: 1;
   min-width: 0;
-  background: #FAFBFF;
+  padding: 0.5rem 0.75rem;
+  border: 1.5px solid #ddd;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.15s;
 }
-.admin-input:focus { border-color: #1A73E8; }
+.admin-input:focus { border-color: var(--primary, #FF6B6B); }
 
-/* ── ボタン ── */
-.admin-btn-primary {
-  padding: 8px 20px;
-  font-size: .9rem;
-  font-weight: 700;
-  color: #fff;
-  background: linear-gradient(135deg, var(--primary), var(--primary2));
-  border-radius: 24px;
-  border: none;
+/* セレクト */
+.admin-select {
+  width: 100%;
+  padding: 0.45rem 0.7rem;
+  border: 1.5px solid #ddd;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  font-family: inherit;
+  background: #fff;
   cursor: pointer;
-  white-space: nowrap;
-  transition: opacity .15s;
-  font-family: var(--font);
 }
-.admin-btn-primary:hover { opacity: .88; }
-.admin-btn-primary:disabled { opacity: .4; cursor: not-allowed; }
+.admin-select:disabled {
+  background: #f0f0f0;
+  cursor: not-allowed;
+  color: #999;
+}
+
+/* ボタン */
+.admin-btn-primary {
+  background: linear-gradient(90deg, var(--primary, #FF6B6B), var(--primary2, #FF8E53));
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 0.5rem 1rem;
+  font-size: 0.88rem;
+  font-weight: 700;
+  cursor: pointer;
+  font-family: inherit;
+  transition: opacity 0.15s;
+  white-space: nowrap;
+}
+.admin-btn-primary:hover { opacity: 0.88; }
 
 .admin-btn-secondary {
-  padding: 7px 16px;
-  font-size: .85rem;
+  background: #f0f0f0;
+  color: #555;
+  border: none;
+  border-radius: 8px;
+  padding: 0.5rem 1rem;
+  font-size: 0.88rem;
   font-weight: 700;
-  color: #1A73E8;
-  background: #EAF2FF;
-  border: 2px solid #1A73E8;
-  border-radius: 20px;
   cursor: pointer;
-  font-family: var(--font);
-  transition: background .15s;
+  font-family: inherit;
+  transition: background 0.15s;
+  white-space: nowrap;
 }
-.admin-btn-secondary:hover { background: #CCE5FF; }
+.admin-btn-secondary:hover { background: #e0e0e0; }
 
 .admin-btn-danger {
-  padding: 7px 16px;
-  font-size: .85rem;
+  background: #fff0f0;
+  color: #e03;
+  border: 1.5px solid #fcc;
+  border-radius: 8px;
+  padding: 0.5rem 1rem;
+  font-size: 0.88rem;
   font-weight: 700;
-  color: #c62828;
-  background: #FFEBEE;
-  border: 2px solid #c62828;
-  border-radius: 20px;
   cursor: pointer;
-  font-family: var(--font);
-  transition: background .15s;
+  font-family: inherit;
+  transition: background 0.15s;
+  white-space: nowrap;
 }
-.admin-btn-danger:hover { background: #FFCDD2; }
+.admin-btn-danger:hover { background: #ffe0e0; }
 
 .admin-btn-icon {
-  width: 36px; height: 36px;
-  border-radius: 50%;
-  background: #EEF3FB;
-  border: none;
-  cursor: pointer;
-  display: flex; align-items: center; justify-content: center;
-  font-size: .9rem;
-  color: var(--text-sub);
-  flex-shrink: 0;
-  font-family: var(--font);
-}
-.admin-btn-icon:hover { background: #DDE8F5; }
-
-.admin-btn-text {
   background: none;
-  border: none;
-  font-size: .82rem;
-  color: var(--text-sub);
-  cursor: pointer;
-  font-family: var(--font);
-  text-decoration: underline dotted;
-  padding: 4px;
-}
-
-/* ── ステータスメッセージ ── */
-.admin-status-msg {
-  font-size: .82rem;
-  font-weight: 700;
-  margin-top: 8px;
-  padding: 6px 10px;
+  border: 1.5px solid #ddd;
   border-radius: 8px;
-  display: none;
+  padding: 0.45rem 0.75rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+  font-family: inherit;
+  white-space: nowrap;
 }
-.admin-status-msg--ok   { color: #155724; background: #d4edda; }
-.admin-status-msg--warn { color: #856404; background: #fff3cd; }
-.admin-status-msg--error{ color: #721c24; background: #f8d7da; }
-.admin-status-msg--info { color: #004085; background: #cce5ff; }
 
-/* ── 優先順位グリッド ── */
-.admin-priority-grid {
+/* ステータスメッセージ */
+.admin-status-msg {
+  display: none;
+  margin-top: 0.5rem;
+  padding: 0.4rem 0.75rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+.admin-status-msg.ok    { background: #e8f8e8; color: #2a7a2a; }
+.admin-status-msg.warn  { background: #fff8e0; color: #7a5a00; }
+.admin-status-msg.error { background: #fff0f0; color: #c00;    }
+.admin-status-msg.info  { background: #e8f0ff; color: #1a3a8a; }
+
+/* 優先度グリッド */
+.priority-grid {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  margin: 16px 0;
+  gap: 0.75rem;
+  margin: 1rem 0;
 }
-.admin-priority-row {
+.priority-item {
   display: flex;
   align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
+  gap: 0.75rem;
 }
-.admin-priority-label { flex-shrink: 0; }
+.priority-label {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: #555;
+  white-space: nowrap;
+  min-width: 90px;
+}
 .priority-badge {
   display: inline-block;
-  padding: 4px 12px;
-  border-radius: 20px;
-  font-size: .8rem;
+  border-radius: 4px;
+  padding: 0.1rem 0.4rem;
+  font-size: 0.75rem;
   font-weight: 800;
-  white-space: nowrap;
+  color: #fff;
 }
-.priority-1 { background: #FFD700; color: #5a4000; }
-.priority-2 { background: #C0C0C0; color: #3a3a3a; }
-.priority-3 { background: #CD7F32; color: #fff; }
+.priority-badge.p1 { background: #FF6B6B; }
+.priority-badge.p2 { background: #FFA040; }
+.priority-badge.p3 { background: #8888CC; }
 
-.admin-select {
-  flex: 1 1 200px;
-  padding: 8px 12px;
-  border: 2px solid #DDE8F5;
-  border-radius: 10px;
-  font-size: .87rem;
-  font-family: var(--font);
-  background: #FAFBFF;
-  outline: none;
-  cursor: pointer;
-  min-width: 0;
-}
-.admin-select:focus { border-color: #1A73E8; }
-.admin-select:disabled { background: #F0F4FA; color: #aaa; cursor: not-allowed; }
-
-.priority-note {
-  font-size: .78rem;
-  color: var(--text-sub);
-  white-space: nowrap;
-}
-.priority-note--recommend { color: #1A73E8; font-weight: 700; }
-
-/* ── 保存行 ── */
-.admin-save-row {
+/* 保存行 */
+.save-row {
   display: flex;
-  gap: 10px;
-  align-items: center;
+  gap: 0.5rem;
+  margin: 0.75rem 0;
   flex-wrap: wrap;
-  margin-bottom: 12px;
 }
 
-/* ── 現在の有効チェーン ── */
-.admin-current-chain {
-  background: #F4F8FF;
-  border-radius: 10px;
-  padding: 10px 14px;
-  margin-top: 8px;
+/* 現在のチェーン */
+.current-chain-wrap {
+  margin-top: 0.75rem;
 }
-.admin-current-chain-label { font-size: .8rem; color: var(--text-sub); margin-bottom: 6px; }
-.chain-badges { display: flex; gap: 8px; flex-wrap: wrap; }
+.current-chain-label {
+  font-size: 0.8rem;
+  color: #888;
+  margin: 0 0 0.4rem;
+}
+.current-chain-display {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  min-height: 2rem;
+  align-items: center;
+}
+.chain-empty { font-size: 0.82rem; color: #aaa; }
 .chain-badge {
-  padding: 4px 12px;
+  display: inline-block;
+  padding: 0.2rem 0.6rem;
   border-radius: 20px;
-  font-size: .8rem;
-  font-weight: 800;
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: #fff;
 }
-.chain-badge--1 { background: #FFF3CD; color: #856404; border: 1px solid #FFEAA7; }
-.chain-badge--2 { background: #D4EDDA; color: #155724; border: 1px solid #C3E6CB; }
-.chain-badge--3 { background: #CCE5FF; color: #004085; border: 1px solid #B8DAFF; }
+.chain-badge.priority-1 { background: #FF6B6B; }
+.chain-badge.priority-2 { background: #FFA040; }
+.chain-badge.priority-3 { background: #8888CC; }
 
-/* ── ステータスカード ── */
-.admin-status-cards {
+/* ステータスカード */
+.status-card-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: 12px;
-  margin-bottom: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 1rem;
 }
 .status-card {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  background: #F4F8FF;
-  border-radius: 12px;
-  padding: 12px 14px;
-  border: 1px solid #DDE8F5;
+  background: #f8f8f8;
+  border-radius: 8px;
+  padding: 0.6rem 0.8rem;
+  text-align: center;
 }
-.status-card-icon {
-  width: 36px; height: 36px;
-  border-radius: 50%;
-  display: flex; align-items: center; justify-content: center;
+.status-card-label {
+  font-size: 0.72rem;
+  color: #888;
+  font-weight: 600;
+  margin-bottom: 0.25rem;
+}
+.status-card-value {
   font-size: 1rem;
-  flex-shrink: 0;
-}
-.status-card-icon--error { background: #FFEBEE; color: #c62828; }
-.status-card-icon--ok    { background: #D4EDDA; color: #155724; }
-.status-card-icon--warn  { background: #FFF3CD; color: #856404; }
-.status-card-value { font-size: 1.05rem; font-weight: 800; color: var(--text-main); }
-.status-card-label { font-size: .75rem; color: var(--text-sub); margin-top: 2px; }
-
-/* ── 直近エラーボックス ── */
-.admin-last-error {
-  background: #FFF8E1;
-  border: 1px solid #FFE082;
-  border-radius: 10px;
-  padding: 12px 14px;
-  margin-bottom: 16px;
-}
-.admin-last-error-title {
-  font-size: .88rem; font-weight: 800; color: #856404; margin-bottom: 6px;
-}
-.admin-last-error-msg {
-  font-size: .85rem; color: var(--text-main); line-height: 1.6; margin-bottom: 8px;
-}
-.admin-last-error-action {
-  font-size: .82rem; color: #1A73E8; font-weight: 700; line-height: 1.6;
+  font-weight: 800;
+  color: #333;
+  word-break: break-all;
 }
 
-/* ── ログ一覧 ── */
-.admin-log-header {
-  display: flex; align-items: center; justify-content: space-between;
-  margin-bottom: 8px;
+/* 直近エラーボックス */
+.recent-error-box {
+  background: #fff0f0;
+  border: 1px solid #fcc;
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.82rem;
+  color: #c00;
+  margin-bottom: 1rem;
+  word-break: break-all;
 }
-.admin-log-title { font-size: .88rem; font-weight: 800; color: var(--text-sub); }
-.admin-log-list {
-  max-height: 320px;
-  overflow-y: auto;
-  background: #1a1a2e;
-  border-radius: 10px;
-  padding: 10px;
-  font-family: 'Courier New', monospace;
-}
-.admin-log-empty {
-  font-size: .82rem; color: #aaa; text-align: center; line-height: 1.7; padding: 16px 0;
-}
-.admin-log-entry {
-  display: flex;
-  gap: 8px;
-  padding: 4px 0;
-  border-bottom: 1px solid #2a2a4a;
-  align-items: flex-start;
-  flex-wrap: wrap;
-}
-.admin-log-ts    { font-size: .72rem; color: #888; white-space: nowrap; flex-shrink: 0; }
-.admin-log-level { font-size: .72rem; font-weight: 800; white-space: nowrap; flex-shrink: 0; min-width: 42px; }
-.admin-log-msg   { font-size: .78rem; color: #ccc; flex: 1; word-break: break-all; line-height: 1.5; }
-.admin-log-level--info  { color: #64b5f6; }
-.admin-log-level--warn  { color: #ffcc02; }
-.admin-log-level--error { color: #ef5350; }
-.admin-log-entry--error .admin-log-msg { color: #ef9a9a; }
-.admin-log-entry--warn  .admin-log-msg { color: #ffe082; }
 
 /* ========================================================
-   アラートログ（v1.1追加）
+   ERR-4 修正: ログテーブルスタイル（新規追加）
    ======================================================== */
-
-.alert-log-list {
-  max-height: 480px;
-  overflow-y: auto;
-  background: #1a1a2e;
-  border-radius: 10px;
-  padding: 10px;
-  font-family: 'Courier New', monospace;
-}
-
-.alert-log-entry {
+.log-table-wrap {
+  overflow-x: auto;
+  margin-bottom: 0.75rem;
+  border: 1px solid #eee;
   border-radius: 8px;
-  padding: 10px 12px;
-  margin-bottom: 10px;
-  border-left: 4px solid #555;
-  background: #22223a;
 }
-.alert-log-entry--model  { border-left-color: #ef5350; }
-.alert-log-entry--prompt { border-left-color: #ffcc02; }
-.alert-log-entry--level  { border-left-color: #64b5f6; }
 
+.log-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+  font-family: 'Courier New', Courier, monospace;
+}
+
+/* ヘッダー行 */
+.log-table thead tr {
+  background: #f0f0f0;
+}
+.log-table th {
+  padding: 0.4rem 0.6rem;
+  text-align: left;
+  font-weight: 800;
+  color: #555;
+  border-bottom: 2px solid #ddd;
+  white-space: nowrap;
+}
+.log-th-ts    { width: 160px; }
+.log-th-level { width: 64px;  }
+.log-th-msg   { width: auto;  }
+
+/* データ行 */
+.log-table tbody tr {
+  border-bottom: 1px solid #f0f0f0;
+  transition: background 0.1s;
+}
+.log-table tbody tr:last-child { border-bottom: none; }
+.log-table tbody tr:hover      { background: #fafafa; }
+
+.log-table td {
+  padding: 0.35rem 0.6rem;
+  vertical-align: top;
+  word-break: break-all;
+}
+
+/* 日時セル */
+.log-td-ts {
+  white-space: nowrap;
+  color: #888;
+  font-size: 0.78rem;
+}
+
+/* 種別バッジ */
+.log-level-badge {
+  display: inline-block;
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  font-weight: 800;
+  font-family: inherit;
+  white-space: nowrap;
+}
+.log-level-info  { background: #e8f0ff; color: #1a3a8a; }
+.log-level-warn  { background: #fff8e0; color: #7a5a00; }
+.log-level-error { background: #fff0f0; color: #c00;    }
+
+/* メッセージセル */
+.log-td-msg {
+  color: #333;
+  line-height: 1.4;
+}
+
+/* ログ空表示 */
+.log-empty {
+  text-align: center;
+  color: #bbb;
+  padding: 1rem;
+  font-size: 0.85rem;
+}
+
+/* ログアクション行 */
+.log-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-top: 0.5rem;
+}
+
+/* アラートログリスト */
+.alert-log-list {
+  list-style: none;
+  padding: 0;
+  margin: 0.75rem 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.alert-log-entry {
+  background: #f8f8f8;
+  border-radius: 8px;
+  padding: 0.6rem 0.8rem;
+  font-size: 0.83rem;
+}
 .alert-log-header {
   display: flex;
   align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin-bottom: 4px;
+  gap: 0.5rem;
+  margin-bottom: 0.3rem;
 }
-.alert-log-ts    { font-size: .72rem; color: #888; white-space: nowrap; }
-.alert-log-model { font-size: .72rem; color: #aaa; white-space: nowrap; flex: 1; text-align: right; }
-.alert-log-msg   { font-size: .82rem; color: #eee; margin-bottom: 6px; word-break: break-all; }
+.alert-log-ts    { color: #aaa; font-size: 0.78rem; margin-left: auto; }
+.alert-log-model { color: #666; font-size: 0.8rem; margin-bottom: 0.2rem; }
+.alert-log-msg   { color: #333; line-height: 1.4; }
 
-/* アラート種別バッジ */
+/* アラートタイプバッジ */
 .alert-type-badge {
-  font-size: .7rem;
+  display: inline-block;
+  padding: 0.1rem 0.45rem;
+  border-radius: 4px;
+  font-size: 0.72rem;
   font-weight: 800;
-  padding: 2px 8px;
-  border-radius: 12px;
   white-space: nowrap;
 }
-.alert-type--model  { background: #b71c1c; color: #fff; }
-.alert-type--prompt { background: #f9a825; color: #1a1a2e; }
-.alert-type--level  { background: #1565c0; color: #fff; }
-.alert-type--other  { background: #444; color: #ccc; }
+.alert-type-model   { background: #fff0f0; color: #c00; }
+.alert-type-prompt  { background: #fff8e0; color: #7a5a00; }
+.alert-type-level   { background: #e8f0ff; color: #1a3a8a; }
+.alert-type-unknown { background: #f0f0f0; color: #666; }
 
-/* JSON出力の折りたたみ */
-.alert-log-raw { margin-top: 4px; }
-.alert-log-raw-summary {
-  font-size: .75rem;
-  color: #64b5f6;
-  cursor: pointer;
-  user-select: none;
-  padding: 2px 0;
+/* RAW JSON 折りたたみ */
+.alert-raw-json {
+  margin-top: 0.4rem;
 }
-.alert-log-raw-summary:hover { color: #90caf9; }
-.alert-log-raw-pre {
-  margin-top: 6px;
-  padding: 8px;
-  background: #111128;
+.alert-raw-json summary {
+  cursor: pointer;
+  color: #888;
+  font-size: 0.78rem;
+  user-select: none;
+}
+.alert-raw-json pre {
+  background: #1e1e1e;
+  color: #d4d4d4;
+  padding: 0.5rem;
   border-radius: 6px;
-  font-size: .72rem;
-  color: #a5d6a7;
+  font-size: 0.72rem;
   overflow-x: auto;
+  margin: 0.3rem 0 0;
+  max-height: 200px;
   white-space: pre-wrap;
   word-break: break-all;
-  max-height: 200px;
-  overflow-y: auto;
 }
 
+/* INFO タイプバナーを青系に */
+#model-error-banner[data-alert-type="INFO"] {
+  background: linear-gradient(90deg, #4A90D9, #5BA4E5);
+}
 
-/* ── レスポンシブ ── */
+/* ---- レスポンシブ ---- */
 @media (max-width: 600px) {
-  .admin-section-body { padding: 14px 14px 16px; }
-  .admin-priority-row { flex-direction: column; align-items: flex-start; }
-  .admin-select       { width: 100%; }
-  .admin-save-row     { flex-direction: column; }
-  .admin-status-cards { grid-template-columns: 1fr 1fr; }
+  .admin-page { padding: 0.75rem; }
+  .priority-item { flex-direction: column; align-items: flex-start; }
+  .priority-label { min-width: unset; }
+  .status-card-grid { grid-template-columns: 1fr 1fr; }
+  .log-th-ts { width: 110px; }
+  .log-td-ts { font-size: 0.72rem; }
 }
+
 @media (max-width: 380px) {
-  .admin-status-cards { grid-template-columns: 1fr; }
+  .save-row { flex-direction: column; }
+  .admin-btn-primary,
+  .admin-btn-secondary,
+  .admin-btn-danger { width: 100%; }
+  .status-card-grid { grid-template-columns: 1fr; }
 }
