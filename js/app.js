@@ -1,11 +1,10 @@
 /**
- * app.js  v2.5.4
- * 変更点 (v2.5.3 → v2.5.4):
- *   - ERR-1: btn-toggle-api のバインドに try-catch を追加し
- *            途中クラッシュで後続バインドが止まらないよう防御
- *   - ERR-2: btn-start のバインドを DOMContentLoaded の先頭に移動し
- *            クラッシュの影響を受けにくい順序に変更
- *   - 全イベントバインドを個別 try-catch で保護
+ * app.js  v2.5.5
+ * 変更点 (v2.5.4 → v2.5.5):
+ *   - loadQuestion: drawModel + clearAnswerLines の個別呼び出しを
+ *                   initCanvases(prob) 1回に統一
+ *                   → canvas.js v2.2 の initCanvases がリサイズ・描画・
+ *                      インタラクション設定を全て行うため連動が保証される
  */
 
 /* ============================================================
@@ -94,17 +93,33 @@ function _refreshOverlayLimit() {
 }
 
 /* ============================================================
-   §5. 問題読み込み / チェック / 次へ
+   §5. 問題読み込み
    ============================================================ */
+/**
+ * v2.5.5 修正:
+ *   initCanvases(prob) を呼ぶだけで
+ *   リサイズ・モデル描画・解答クリア・インタラクション設定が全て完了する
+ */
 function loadQuestion() {
   const prob = AppState.problems[AppState.currentIdx];
   if (!prob) return;
-  if (window.drawModel)        window.drawModel(prob);
-  if (window.clearAnswerLines) window.clearAnswerLines();
+
+  // canvas.js v2.2 の initCanvases が全処理を担う
+  if (window.initCanvases) {
+    window.initCanvases(prob);
+  } else {
+    // フォールバック（canvas.js 読み込み失敗時）
+    if (window.drawModel)        window.drawModel(prob);
+    if (window.clearAnswerLines) window.clearAnswerLines();
+  }
+
   updateProgress();
   updateHintMsg();
 }
 
+/* ============================================================
+   §6. 答え合わせ / 次へ / 結果
+   ============================================================ */
 function checkAnswer() {
   const lines = window.getAnswerLines ? window.getAnswerLines() : [];
   const prob  = AppState.problems[AppState.currentIdx];
@@ -143,7 +158,7 @@ function showResult() {
 }
 
 /* ============================================================
-   §6. ローディング
+   §7. ローディング
    ============================================================ */
 function showLoading(visible) {
   const el = document.getElementById('loading-overlay');
@@ -151,7 +166,7 @@ function showLoading(visible) {
 }
 
 /* ============================================================
-   §7. ゲーム開始
+   §8. ゲーム開始
    ============================================================ */
 async function startGame() {
   AppState.score      = 0;
@@ -161,7 +176,6 @@ async function startGame() {
   AppState.useAI  = !!apiKey;
   AppState.apiKey = apiKey;
 
-  // API キーなし → ローカル問題で開始
   if (!AppState.useAI) {
     const local = (window.LOCAL_PROBLEMS || [])[AppState.level] || [];
     if (local.length === 0) {
@@ -181,34 +195,26 @@ async function startGame() {
     const timeoutPromise = new Promise((_, reject) =>
       setTimeout(() => reject(new Error('Timeout: AI generation took too long')), 30000)
     );
-
     const result = await Promise.race([
       GeminiAPI.generateProblems(AppState.level),
       timeoutPromise
     ]);
-
     AppState.problems = result.problems;
-
     if (result.alertType) {
       showErrorBanner(result.alertType);
     } else {
       hideErrorBanner();
     }
-
   } catch (err) {
     const fallback    = (window.LOCAL_PROBLEMS || [])[AppState.level];
     const hasFallback = Array.isArray(fallback) && fallback.length > 0;
-
     showLoading(false);
-
     if (!hasFallback) {
       showErrorBanner('MODEL', `AI error & no local problems. (${err.message})`);
       return;
     }
-
     AppState.problems = fallback;
     showErrorBanner('MODEL', err.message);
-
   } finally {
     showLoading(false);
   }
@@ -219,19 +225,15 @@ async function startGame() {
 }
 
 /* ============================================================
-   §8. イベントバインド（ERR-1・ERR-2 修正: 個別 try-catch で保護）
+   §9. イベントバインド
    ============================================================ */
 document.addEventListener('DOMContentLoaded', () => {
 
-  // ---- コアアクション（最優先でバインド） ----
-
-  // ERR-2 修正: はじめるボタンを最初にバインド
   try {
     document.getElementById('btn-start')
       ?.addEventListener('click', startGame);
   } catch (e) { console.error('[app] btn-start bind error:', e); }
 
-  // ERR-1 修正: APIキーパネルトグルを個別 try-catch で保護
   try {
     document.getElementById('btn-toggle-api')
       ?.addEventListener('click', () => {
@@ -252,7 +254,6 @@ document.addEventListener('DOMContentLoaded', () => {
       });
   } catch (e) { console.error('[app] btn-save-api bind error:', e); }
 
-  // ---- レベル選択 ----
   try {
     document.querySelectorAll('[data-level]').forEach(btn => {
       btn.addEventListener('click', () => {
@@ -261,18 +262,15 @@ document.addEventListener('DOMContentLoaded', () => {
         AppState.level = parseInt(btn.dataset.level, 10);
       });
     });
-    // デフォルトレベル
     const defaultBtn = document.querySelector('[data-level="0"]');
     if (defaultBtn) defaultBtn.click();
   } catch (e) { console.error('[app] level selector bind error:', e); }
 
-  // ---- 管理画面リンク ----
   try {
     document.getElementById('btn-admin-model')
       ?.addEventListener('click', () => window.open('admin.html', '_blank'));
   } catch (e) { console.error('[app] btn-admin-model bind error:', e); }
 
-  // ---- ゲームコントロール ----
   try {
     document.getElementById('btn-home')
       ?.addEventListener('click', () => showScreen('screen-start'));
@@ -302,7 +300,6 @@ document.addEventListener('DOMContentLoaded', () => {
       ?.addEventListener('click', goNext);
   } catch (e) { console.error('[app] btn-next bind error:', e); }
 
-  // ---- リザルト画面 ----
   try {
     document.getElementById('btn-retry')
       ?.addEventListener('click', startGame);
@@ -313,18 +310,13 @@ document.addEventListener('DOMContentLoaded', () => {
       ?.addEventListener('click', () => showScreen('screen-start'));
   } catch (e) { console.error('[app] btn-result-home bind error:', e); }
 
-  // ---- バナー操作 ----
   try {
     document.querySelector('#model-error-banner .banner-close')
-      ?.addEventListener('click', (e) => {
-        e.stopPropagation();
-        hideErrorBanner();
-      });
+      ?.addEventListener('click', (e) => { e.stopPropagation(); hideErrorBanner(); });
     document.querySelector('#model-error-banner .banner-text')
       ?.addEventListener('click', () => window.open('admin.html', '_blank'));
   } catch (e) { console.error('[app] banner bind error:', e); }
 
-  // ---- geminiStatusUpdate リスナー ----
   try {
     window.addEventListener('geminiStatusUpdate', (e) => {
       const status = e.detail || {};
@@ -336,13 +328,10 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   } catch (e) { console.error('[app] geminiStatusUpdate bind error:', e); }
 
-  // ---- 初回起動バナー ----
   try {
     const hasKey   = !!GeminiAPI.loadApiKey();
     const hasChain = !!GeminiAPI.loadAdminChain();
-    if (hasKey && !hasChain) {
-      showErrorBanner('INFO');
-    }
+    if (hasKey && !hasChain) showErrorBanner('INFO');
   } catch (e) { console.error('[app] initial banner error:', e); }
 
 });
