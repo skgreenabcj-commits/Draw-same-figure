@@ -1,9 +1,9 @@
 /**
- * app.js  v2.5.2
- * 変更点 (v2.5.1 → v2.5.2):
- *   - NEW-2: ALERT_MESSAGES に 'INFO' キーを追加
- *            customMsg なしで showErrorBanner('INFO') を呼んでも
- *            undefined にならないよう防護
+ * app.js  v2.5.3
+ * 変更点 (v2.5.2 → v2.5.3):
+ *   - DEBUG-2: startGame の catch ブロックに LOCAL_PROBLEMS 未定義ガードを追加
+ *              フォールバック問題が0件の場合はゲーム画面に遷移せず早期 return
+ *              → drawModel(undefined) によるクラッシュを防止
  */
 
 /* ============================================================
@@ -23,7 +23,6 @@ const PRAISE_LIST = ['Great!', 'Perfect!', 'Excellent!', 'Amazing!', 'Brilliant!
 /* ============================================================
    §1. アラートタイプ → バナーメッセージ
    ============================================================ */
-// NEW-2 修正: INFO キーを追加
 const ALERT_MESSAGES = {
   MODEL  : 'CHANGE AI model',
   PROMPT : 'CHECK AI prompt or CHANGE AI model',
@@ -47,8 +46,6 @@ function showErrorBanner(alertType, customMsg) {
   const banner = document.getElementById('model-error-banner');
   if (!banner) return;
 
-  // NEW-2 修正: ALERT_MESSAGES[alertType] が undefined でも
-  // customMsg → ALERT_MESSAGES → alertType 自体 の順でフォールバック
   const msg      = customMsg || ALERT_MESSAGES[alertType] || String(alertType || 'AI error');
   const textEl   = banner.querySelector('.banner-text');
   const closeBtn = banner.querySelector('.banner-close');
@@ -154,7 +151,7 @@ function showLoading(visible) {
 }
 
 /* ============================================================
-   §7. ゲーム開始
+   §7. ゲーム開始（DEBUG-2 修正箇所）
    ============================================================ */
 async function startGame() {
   AppState.score      = 0;
@@ -164,8 +161,15 @@ async function startGame() {
   AppState.useAI  = !!apiKey;
   AppState.apiKey = apiKey;
 
+  // API キーなし → ローカル問題で即開始
   if (!AppState.useAI) {
-    AppState.problems = (window.LOCAL_PROBLEMS || [])[AppState.level] || [];
+    const local = (window.LOCAL_PROBLEMS || [])[AppState.level] || [];
+    if (local.length === 0) {
+      // ローカル問題すら存在しない場合はスタート画面に留まる
+      showErrorBanner('MODEL', 'No problems available. Please check problems.js.');
+      return;
+    }
+    AppState.problems = local;
     showScreen('screen-game');
     loadQuestion();
     _refreshOverlayLimit();
@@ -173,6 +177,7 @@ async function startGame() {
   }
 
   showLoading(true);
+
   try {
     const timeoutPromise = new Promise((_, reject) =>
       setTimeout(() => reject(new Error('Timeout: AI generation took too long')), 30000)
@@ -193,12 +198,43 @@ async function startGame() {
     }
 
   } catch (err) {
-    AppState.problems = (window.LOCAL_PROBLEMS || [])[AppState.level] || [];
+    // ----------------------------------------------------------------
+    // DEBUG-2 修正:
+    //   タイムアウト / ネットワークエラー時のフォールバック処理を強化
+    //
+    //   旧実装:
+    //     AppState.problems = (window.LOCAL_PROBLEMS || [])[AppState.level] || [];
+    //     → LOCAL_PROBLEMS が未定義 or 該当レベルが空の場合に problems=[] のまま
+    //       ゲーム画面へ遷移し、drawModel(undefined) でクラッシュ
+    //
+    //   新実装:
+    //     フォールバックが0件の場合は showLoading を閉じてバナーを表示し、
+    //     ゲーム画面へ遷移しない（早期 return）
+    // ----------------------------------------------------------------
+    const fallback = (window.LOCAL_PROBLEMS || [])[AppState.level];
+    const hasFallback = Array.isArray(fallback) && fallback.length > 0;
+
+    showLoading(false); // finally より先に閉じてから return するため個別に呼ぶ
+
+    if (!hasFallback) {
+      // フォールバック問題が存在しない → スタート画面に留まりバナー表示
+      showErrorBanner('MODEL',
+        `AI error & no local problems. (${err.message})`
+      );
+      return; // ← ゲーム画面に遷移しない（クラッシュ防止）
+    }
+
+    // フォールバック問題あり → ローカル問題でゲーム継続
+    AppState.problems = fallback;
     showErrorBanner('MODEL', err.message);
+
   } finally {
+    // DEBUG-2 修正: 早期 return したケースでは既に showLoading(false) 済みだが、
+    // finally は必ず実行されるため冪等な操作（display:none）として問題なし
     showLoading(false);
   }
 
+  // catch で早期 return した場合はここに到達しない
   showScreen('screen-game');
   loadQuestion();
   _refreshOverlayLimit();
@@ -251,7 +287,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (window.undoLastLine) window.undoLastLine();
   });
   document.getElementById('btn-check')?.addEventListener('click', checkAnswer);
-  document.getElementById('btn-next')?.addEventListener('click', goNext);
+  document.getElementById('btn-next')?.addEventListener('click',  goNext);
 
   // リザルト画面
   document.getElementById('btn-retry')?.addEventListener('click', startGame);
@@ -270,7 +306,6 @@ document.addEventListener('DOMContentLoaded', () => {
   // geminiStatusUpdate リスナー
   window.addEventListener('geminiStatusUpdate', (e) => {
     const status = e.detail || {};
-    // alertType が null / undefined / 空文字の場合はバナーを閉じる
     if (status.alertType) {
       showErrorBanner(status.alertType);
     } else {
@@ -282,7 +317,6 @@ document.addEventListener('DOMContentLoaded', () => {
   const hasKey   = !!GeminiAPI.loadApiKey();
   const hasChain = !!GeminiAPI.loadAdminChain();
   if (hasKey && !hasChain) {
-    // NEW-2 修正: ALERT_MESSAGES.INFO が定義済みなので customMsg 省略可能に
     showErrorBanner('INFO');
   }
 });
