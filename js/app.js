@@ -1,21 +1,21 @@
 /**
- * app.js  v2.5.1
- * 変更点:
- *   - BUG-A: geminiStatusUpdate リスナーで alertType が null/undefined の場合は
- *            hideErrorBanner() を呼び、前回バナーを必ずクリア
- *   - BUG-D: showErrorBanner / hideErrorBanner を banner-text / banner-close 対応に修正
+ * app.js  v2.5.2
+ * 変更点 (v2.5.1 → v2.5.2):
+ *   - NEW-2: ALERT_MESSAGES に 'INFO' キーを追加
+ *            customMsg なしで showErrorBanner('INFO') を呼んでも
+ *            undefined にならないよう防護
  */
 
 /* ============================================================
    §0. AppState
    ============================================================ */
 const AppState = {
-  level       : 0,
-  problems    : [],
-  currentIdx  : 0,
-  score       : 0,
-  useAI       : false,
-  apiKey      : ''
+  level      : 0,
+  problems   : [],
+  currentIdx : 0,
+  score      : 0,
+  useAI      : false,
+  apiKey     : ''
 };
 
 const PRAISE_LIST = ['Great!', 'Perfect!', 'Excellent!', 'Amazing!', 'Brilliant!'];
@@ -23,10 +23,12 @@ const PRAISE_LIST = ['Great!', 'Perfect!', 'Excellent!', 'Amazing!', 'Brilliant!
 /* ============================================================
    §1. アラートタイプ → バナーメッセージ
    ============================================================ */
+// NEW-2 修正: INFO キーを追加
 const ALERT_MESSAGES = {
   MODEL  : 'CHANGE AI model',
   PROMPT : 'CHECK AI prompt or CHANGE AI model',
-  LEVEL  : 'CONSIDER changing the level limits'
+  LEVEL  : 'CONSIDER changing the level limits',
+  INFO   : 'Configure AI models for best experience'
 };
 
 /* ============================================================
@@ -39,20 +41,17 @@ function showScreen(id) {
 }
 
 /* ============================================================
-   §3. バナー（BUG-A・BUG-D 修正）
+   §3. バナー
    ============================================================ */
-/**
- * BUG-D 修正:
- *   banner-text（クリックで admin.html 遷移）と
- *   banner-close（× クリックで閉じるだけ）を適切にセット
- */
 function showErrorBanner(alertType, customMsg) {
-  const banner    = document.getElementById('model-error-banner');
+  const banner = document.getElementById('model-error-banner');
   if (!banner) return;
 
-  const msg       = customMsg || ALERT_MESSAGES[alertType] || alertType || 'AI error';
-  const textEl    = banner.querySelector('.banner-text');
-  const closeBtn  = banner.querySelector('.banner-close');
+  // NEW-2 修正: ALERT_MESSAGES[alertType] が undefined でも
+  // customMsg → ALERT_MESSAGES → alertType 自体 の順でフォールバック
+  const msg      = customMsg || ALERT_MESSAGES[alertType] || String(alertType || 'AI error');
+  const textEl   = banner.querySelector('.banner-text');
+  const closeBtn = banner.querySelector('.banner-close');
 
   if (textEl)   textEl.textContent = `⚠️ ${msg} → tap to configure`;
   if (closeBtn) closeBtn.setAttribute('aria-label', 'Close alert');
@@ -104,7 +103,7 @@ function _refreshOverlayLimit() {
 function loadQuestion() {
   const prob = AppState.problems[AppState.currentIdx];
   if (!prob) return;
-  if (window.drawModel)  window.drawModel(prob);
+  if (window.drawModel)        window.drawModel(prob);
   if (window.clearAnswerLines) window.clearAnswerLines();
   updateProgress();
   updateHintMsg(prob);
@@ -117,11 +116,17 @@ function checkAnswer() {
     AppState.score++;
     document.getElementById('score-val').textContent = AppState.score;
     const el = document.getElementById('feedback-correct');
-    if (el) { el.style.display = 'flex'; setTimeout(() => { el.style.display = 'none'; goNext(); }, 900); }
+    if (el) {
+      el.style.display = 'flex';
+      setTimeout(() => { el.style.display = 'none'; goNext(); }, 900);
+    }
   } else {
     if (window.drawWrongFeedback) window.drawWrongFeedback();
     const el = document.getElementById('feedback-wrong');
-    if (el) { el.style.display = 'flex'; setTimeout(() => el.style.display = 'none', 700); }
+    if (el) {
+      el.style.display = 'flex';
+      setTimeout(() => el.style.display = 'none', 700);
+    }
   }
 }
 
@@ -155,7 +160,7 @@ async function startGame() {
   AppState.score      = 0;
   AppState.currentIdx = 0;
 
-  const apiKey = GeminiAPI.loadApiKey();
+  const apiKey    = GeminiAPI.loadApiKey();
   AppState.useAI  = !!apiKey;
   AppState.apiKey = apiKey;
 
@@ -180,7 +185,7 @@ async function startGame() {
 
     AppState.problems = result.problems;
 
-    // BUG-A 修正: alertType が null/falsy の場合は必ずバナーを閉じる
+    // alertType が null/falsy の場合は必ずバナーを閉じる
     if (result.alertType) {
       showErrorBanner(result.alertType);
     } else {
@@ -239,16 +244,20 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // ゲームコントロール
   document.getElementById('btn-home')?.addEventListener('click', () => showScreen('screen-start'));
-  document.getElementById('btn-clear')?.addEventListener('click', () => { if (window.clearAnswerLines) window.clearAnswerLines(); });
-  document.getElementById('btn-undo')?.addEventListener('click',  () => { if (window.undoLastLine) window.undoLastLine(); });
+  document.getElementById('btn-clear')?.addEventListener('click', () => {
+    if (window.clearAnswerLines) window.clearAnswerLines();
+  });
+  document.getElementById('btn-undo')?.addEventListener('click', () => {
+    if (window.undoLastLine) window.undoLastLine();
+  });
   document.getElementById('btn-check')?.addEventListener('click', checkAnswer);
-  document.getElementById('btn-next')?.addEventListener('click',  goNext);
+  document.getElementById('btn-next')?.addEventListener('click', goNext);
 
   // リザルト画面
   document.getElementById('btn-retry')?.addEventListener('click', startGame);
   document.getElementById('btn-result-home')?.addEventListener('click', () => showScreen('screen-start'));
 
-  // BUG-D 修正: バナーの × ボタン（閉じるだけ）
+  // バナーの × ボタン（閉じるだけ）
   document.querySelector('#model-error-banner .banner-close')?.addEventListener('click', (e) => {
     e.stopPropagation();
     hideErrorBanner();
@@ -258,7 +267,7 @@ document.addEventListener('DOMContentLoaded', () => {
     window.open('admin.html', '_blank');
   });
 
-  // geminiStatusUpdate リスナー（BUG-A 修正）
+  // geminiStatusUpdate リスナー
   window.addEventListener('geminiStatusUpdate', (e) => {
     const status = e.detail || {};
     // alertType が null / undefined / 空文字の場合はバナーを閉じる
@@ -273,6 +282,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const hasKey   = !!GeminiAPI.loadApiKey();
   const hasChain = !!GeminiAPI.loadAdminChain();
   if (hasKey && !hasChain) {
-    showErrorBanner('INFO', 'Recommended: configure AI models in admin panel');
+    // NEW-2 修正: ALERT_MESSAGES.INFO が定義済みなので customMsg 省略可能に
+    showErrorBanner('INFO');
   }
 });
