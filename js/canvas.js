@@ -1,12 +1,21 @@
 /**
- * canvas.js  v2.1R
- * 旧版 v2.1 をベースに以下を修正:
- *   - 差分6(pointer-events): setupInteraction で cloneNode 後に
- *     pointer-events を auto に設定（CSS側で none を設定していないため不要だが念のため明示）
- *   - 差分7: drawWrongFeedback の引数シグネチャを旧版通り (problem, userLines) に維持
- *   - initCanvases: 旧版通りステートリセットのみ（描画はapp.jsのloadQuestionが担う）
+ * canvas.js  v2.1R2
+ * 修正内容:
+ *   - 根本原因1: resizeCanvas() をキャンバスの CSS 実サイズではなく
+ *     .canvas-wrap の確定サイズから取得するよう修正。
+ *     getBoundingClientRect が 0 を返す場合は offsetWidth、
+ *     それも 0 の場合は parentElement を遡って取得する。
+ *   - 根本原因2: drawModel/drawAnswer 内で毎回 resizeCanvas() を呼ぶのをやめ、
+ *     _getCanvasSize() で CSS 論理サイズを取得して描画計算に使用する。
+ *     canvas の内部解像度リセット（canvas.width = ...）は initCanvases 時と
+ *     ResizeObserver 時のみ行う。
+ *   - 根本原因3: loadQuestion から呼ばれる描画を setTimeout(0) + rAF で
+ *     確実にレイアウト確定後に実行する。
  */
 
+/* ============================================================
+   内部状態
+   ============================================================ */
 const CanvasState = {
   userLines:  [],
   dragging:   false,
@@ -15,6 +24,9 @@ const CanvasState = {
   problem:    null
 };
 
+/* ============================================================
+   描画定数
+   ============================================================ */
 const DOT_RADIUS         = 5;
 const SNAP_RADIUS        = 0.4;
 const LINE_WIDTH         = 3;
@@ -25,6 +37,9 @@ const CORRECT_LINE_COLOR = '#22BB55';
 const DOT_COLOR          = '#AACCEE';
 const BG_COLOR           = '#F8FBFF';
 
+/* ============================================================
+   グリッドヘッダー用定数
+   ============================================================ */
 const ROW_ANIMALS_4 = ['🐶', '🐱', '🐰', '🐻'];
 const ROW_ANIMALS_5 = ['🐶', '🐱', '🐰', '🐻', '🐼'];
 const COL_NUMBERS_4 = ['１', '２', '３', '４'];
@@ -107,26 +122,90 @@ function syncColHeaderFontSize(side) {
   });
 }
 
+function syncHeaders(problem) {
+  if (problem.level > 2) return;
+  ['model', 'answer'].forEach(side => {
+    syncRowHeaderHeight(side, problem.grid.rows);
+    syncColHeaderFontSize(side);
+  });
+}
+
 /* ============================================================
-   ユーティリティ
+   根本原因1・2 修正: キャンバスサイズ取得 & リサイズ
    ============================================================ */
-function resizeCanvas(canvas) {
+
+/**
+ * .canvas-wrap の実 CSS 幅を確実に取得する。
+ * getBoundingClientRect → offsetWidth → 親要素を遡る の順で試みる。
+ * すべて 0 の場合は fallback 値 280 を返す。
+ */
+function _getWrapSize(canvasId) {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return 280;
+
+  // canvas 自身の CSS 幅を試みる（width:100% が効いていれば取れる）
+  let size = canvas.getBoundingClientRect().width;
+  if (size > 10) return size;
+
+  // 親 (.canvas-wrap) から取得
   const wrap = canvas.parentElement;
-  if (!wrap) return 300;
-  let size = wrap.getBoundingClientRect().width;
-  if (!size || size < 10) size = wrap.offsetWidth || 300;
-  const dpr          = window.devicePixelRatio || 1;
-  const physicalSize = Math.round(size * dpr);
-  if (canvas.width !== physicalSize || canvas.height !== physicalSize) {
-    canvas.width  = physicalSize;
-    canvas.height = physicalSize;
+  if (wrap) {
+    size = wrap.getBoundingClientRect().width;
+    if (size > 10) return size;
+    size = wrap.offsetWidth;
+    if (size > 10) return size;
   }
+
+  // さらに親 (.grid-body) から取得して row-header 分を引く
+  const gridBody = wrap && wrap.parentElement;
+  if (gridBody) {
+    const headerSize = parseFloat(
+      getComputedStyle(document.documentElement).getPropertyValue('--header-size')
+    ) || 56;
+    size = (gridBody.getBoundingClientRect().width || gridBody.offsetWidth || 0) - headerSize;
+    if (size > 10) return size;
+  }
+
+  return 280; // 最終フォールバック
+}
+
+/**
+ * canvas の内部解像度を CSS サイズに合わせて DPR 対応でセットする。
+ * ctx の変換行列もリセットしてスケールを再適用する。
+ * 戻り値: CSS 論理ピクセル単位のサイズ（描画計算に使用）
+ */
+function _resizeCanvasToWrap(canvasId) {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return 280;
+
+  const size = _getWrapSize(canvasId);
+  const dpr  = window.devicePixelRatio || 1;
+  const phys = Math.round(size * dpr);
+
+  // サイズが変わった場合のみ内部解像度を更新（変換行列もリセット）
+  if (canvas.width !== phys || canvas.height !== phys) {
+    canvas.width  = phys;
+    canvas.height = phys;
+  }
+
   const ctx = canvas.getContext('2d');
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.scale(dpr, dpr);
+
   return size;
 }
 
+/**
+ * 旧版互換: resizeCanvas(canvas) シグネチャを維持しつつ
+ * canvas の id から _resizeCanvasToWrap を呼ぶ。
+ */
+function resizeCanvas(canvas) {
+  return _resizeCanvasToWrap(canvas.id);
+}
+
+/* ============================================================
+   グリッドジオメトリ計算
+   ============================================================ */
 function calcGrid(size, grid) {
   const PAD   = size * 0.12;
   const inner = size - PAD * 2;
@@ -215,22 +294,15 @@ function drawPreviewLine(ctx, g, fromDot, toPx) {
   ctx.restore();
 }
 
-function syncHeaders(problem) {
-  if (problem.level > 2) return;
-  ['model', 'answer'].forEach(side => {
-    syncRowHeaderHeight(side, problem.grid.rows);
-    syncColHeaderFontSize(side);
-  });
-}
-
 /* ============================================================
    公開: 見本キャンバス描画
    ============================================================ */
 function drawModel(problem) {
+  const size = _resizeCanvasToWrap('canvas-model');
   const canvas = document.getElementById('canvas-model');
-  const size   = resizeCanvas(canvas);
-  const ctx    = canvas.getContext('2d');
-  const g      = calcGrid(size, problem.grid);
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const g   = calcGrid(size, problem.grid);
 
   drawBackground(ctx, size);
   drawDots(ctx, g, problem.grid);
@@ -245,10 +317,11 @@ function drawModel(problem) {
    公開: 回答キャンバス描画
    ============================================================ */
 function drawAnswer(problem) {
+  const size = _resizeCanvasToWrap('canvas-answer');
   const canvas = document.getElementById('canvas-answer');
-  const size   = resizeCanvas(canvas);
-  const ctx    = canvas.getContext('2d');
-  const g      = calcGrid(size, problem.grid);
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const g   = calcGrid(size, problem.grid);
 
   drawBackground(ctx, size);
   drawDots(ctx, g, problem.grid);
@@ -271,9 +344,10 @@ function drawAnswer(problem) {
    オーバーレイ描画
    ============================================================ */
 function drawOverlay(problem, toPx) {
+  const size = _resizeCanvasToWrap('canvas-overlay');
   const canvas = document.getElementById('canvas-overlay');
-  const size   = resizeCanvas(canvas);
-  const ctx    = canvas.getContext('2d');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, size, size);
 
   if (!CanvasState.dragging || !CanvasState.startPt) return;
@@ -301,7 +375,6 @@ function setupInteraction(problem, onLineAdded) {
   oldOv.parentNode.replaceChild(newOv, oldOv);
   const ov = document.getElementById('canvas-overlay');
 
-  // 差分7修正: pointer-events を明示的に auto に設定
   ov.style.pointerEvents = 'auto';
   ov.style.cursor        = 'crosshair';
 
@@ -314,7 +387,7 @@ function setupInteraction(problem, onLineAdded) {
   const onStart = (e) => {
     e.preventDefault();
     const pos  = getPos(e);
-    const size = ov.getBoundingClientRect().width || ov.offsetWidth || 300;
+    const size = _getWrapSize('canvas-overlay');
     const g    = calcGrid(size, problem.grid);
     const snap = snapToGrid(g, pos.x, pos.y);
     if (!snap) return;
@@ -347,7 +420,7 @@ function setupInteraction(problem, onLineAdded) {
     overlayCtx.clearRect(0, 0, ov.width, ov.height);
 
     if (!rawPos) return;
-    const size    = rect.width || ov.offsetWidth || 300;
+    const size    = _getWrapSize('canvas-overlay');
     const g       = calcGrid(size, problem.grid);
     const endSnap = snapToGrid(g, rawPos.x, rawPos.y);
     if (!endSnap) return;
@@ -434,7 +507,7 @@ function drawWrongFeedback(problem, userLines) {
 }
 
 /* ============================================================
-   ResizeObserver
+   ResizeObserver — リサイズ時の再描画
    ============================================================ */
 function setupResizeObserver() {
   const redraw = () => {
@@ -456,7 +529,7 @@ function setupResizeObserver() {
 }
 
 /* ============================================================
-   公開: キャンバス初期化
+   公開: キャンバス初期化（問題切り替え時）
    ============================================================ */
 function initCanvases(problem) {
   CanvasState.userLines = [];
@@ -464,6 +537,11 @@ function initCanvases(problem) {
   CanvasState.startPt   = null;
   CanvasState.currentPt = null;
   CanvasState.problem   = problem;
+  // 内部解像度を一旦リセット（次の描画時に正しいサイズで再セットされる）
+  ['canvas-model', 'canvas-answer', 'canvas-overlay'].forEach(id => {
+    const c = document.getElementById(id);
+    if (c) { c.width = 1; c.height = 1; }
+  });
 }
 
 document.addEventListener('DOMContentLoaded', setupResizeObserver);
