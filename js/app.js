@@ -99,8 +99,13 @@ function loadQuestion(index) {
   initCanvases(problem);
   updateHintMsg(problem);
   buildGridHeaders(problem);
-  // 2フレーム待機でキャンバスサイズが確定してから描画
-  requestAnimationFrame(() => {
+
+  // 根本原因3 修正:
+  // setTimeout(0) でレイアウトエンジンに制御を返し、
+  // Flexレイアウト計算を完了させてから rAF で描画する。
+  // rAF 二重ネストだけでは .canvas-wrap の clientWidth が
+  // 0 のままになるケースがあるため setTimeout(0) を先行させる。
+  setTimeout(() => {
     requestAnimationFrame(() => {
       drawModel(problem);
       drawAnswer(problem);
@@ -109,7 +114,7 @@ function loadQuestion(index) {
       });
       _refreshOverlayLimit(problem, 0);
     });
-  });
+  }, 0);
 }
 
 /* ============================================================
@@ -177,12 +182,10 @@ async function startGame() {
       const timeoutPromise = new Promise((_, reject) =>
         setTimeout(() => reject(new Error('タイムアウト')), 30000)
       );
-      // generateProblems が { problems, validCount, alertType } を返す場合に対応
       const result = await Promise.race([
         generateProblems(level, 5, apiKey),
         timeoutPromise
       ]);
-      // 旧版互換: 配列で返った場合もオブジェクトで返った場合も両対応
       if (Array.isArray(result)) {
         AppState.problems = result;
       } else {
@@ -210,9 +213,14 @@ async function startGame() {
   AppState.score        = 0;
   AppState.currentIndex = 0;
   showScreen('screen-game');
-  requestAnimationFrame(() => {
+
+  // 根本原因3 修正:
+  // rAF 二重ネストだけでは Flex レイアウト計算が完了しない場合があるため
+  // setTimeout(0) でブラウザに制御を返してレイアウトを確定させてから
+  // rAF で描画する
+  setTimeout(() => {
     requestAnimationFrame(() => { loadQuestion(0); });
-  });
+  }, 0);
 }
 
 /* ============================================================
