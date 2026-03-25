@@ -172,6 +172,8 @@ function showResult() {
 /* ============================================================
    ゲーム開始
    ============================================================ */
+/*
+=== backup ===
 async function startGame() {
   const level  = AppState.level;
   const apiKey = AppState.apiKey;
@@ -220,6 +222,73 @@ async function startGame() {
   // rAF で描画する
   setTimeout(() => {
     requestAnimationFrame(() => { loadQuestion(0); });
+  }, 0);
+}
+*/
+async function startGame() {
+  const level = AppState.level;
+  console.log('[1] startGame 開始, level:', level);
+  showLoading(true);
+  hideErrorBanner();
+
+  let problems = null;
+
+  const apiKey = (typeof getApiKey === 'function') ? getApiKey() : null;
+  console.log('[2] apiKey:', apiKey ? '存在' : 'なし');
+
+  if (apiKey) {
+    try {
+      problems = await Promise.race([
+        generateProblems(level),
+        new Promise((_, rej) =>
+          setTimeout(() => rej(new Error('timeout')), GEMINI_TIMEOUT_MS)
+        ),
+      ]);
+      console.log('[3] Gemini結果:', problems);
+    } catch (e) {
+      console.warn('[3] Gemini失敗:', e.message);
+    }
+  }
+
+  if (!problems || !problems.length) {
+    console.log('[4] フォールバック開始');
+    const raw = localStorage.getItem(LOCAL_PROBLEMS_KEY);
+    if (raw) {
+      try { problems = JSON.parse(raw); } catch { }
+    }
+    console.log('[4a] localStorage結果:', problems);
+
+    if (!problems || !problems.length) {
+      if (typeof LOCAL_PROBLEMS !== 'undefined' && Array.isArray(LOCAL_PROBLEMS)) {
+        problems = LOCAL_PROBLEMS.filter(p => p.level === level);
+        console.log('[4b] LOCAL_PROBLEMS filter結果:', problems?.length,
+          '/ level比較:', typeof level, level,
+          '/ 先頭のlevel型:', typeof LOCAL_PROBLEMS[0]?.level, LOCAL_PROBLEMS[0]?.level);
+      } else {
+        console.log('[4b] LOCAL_PROBLEMS が未定義またはArrayでない');
+      }
+    }
+  }
+
+  showLoading(false);
+
+  console.log('[5] 最終problems:', problems?.length, problems);
+
+  if (!problems || !problems.length) {
+    showErrorBanner('問題を取得できませんでした。');
+    return;
+  }
+
+  AppState.problems = problems;
+  console.log('[6] AppState.problems 代入後:', AppState.problems.length);
+
+  showScreen('screen-game');
+
+  setTimeout(() => {
+    requestAnimationFrame(() => {
+      console.log('[7] loadQuestion直前 AppState.problems:', AppState.problems.length);
+      loadQuestion(0);
+    });
   }, 0);
 }
 
