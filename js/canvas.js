@@ -1,403 +1,469 @@
 /**
- * canvas.js  v2.2
- * 変更点 (v2.1 → v2.2):
- *   - initCanvases: resizeAll() + drawModel() + setupInteraction() を内部で実行し
- *                   app.js から呼ぶだけでキャンバスが表示・連動するよう修正
- *   - resizeAll: canvas-answer-wrap の実サイズを基準にDPR対応リサイズ
- *   - ResizeObserver を answer-wrap に設定し、ウィンドウリサイズでも再描画
+ * canvas.js  v2.1R
+ * 旧版 v2.1 をベースに以下を修正:
+ *   - 差分6(pointer-events): setupInteraction で cloneNode 後に
+ *     pointer-events を auto に設定（CSS側で none を設定していないため不要だが念のため明示）
+ *   - 差分7: drawWrongFeedback の引数シグネチャを旧版通り (problem, userLines) に維持
+ *   - initCanvases: 旧版通りステートリセットのみ（描画はapp.jsのloadQuestionが担う）
  */
 
-'use strict';
-
-/* ============================================================
-   §0. 共有ステート
-   ============================================================ */
 const CanvasState = {
-  problem    : null,
-  userLines  : [],
-  dragging   : false,
-  startPt    : null,
-  currentPt  : null
+  userLines:  [],
+  dragging:   false,
+  startPt:    null,
+  currentPt:  null,
+  problem:    null
 };
 
-/* ============================================================
-   §1. 描画定数
-   ============================================================ */
-const GRID_N      = 3;       // グリッド分割数（0〜3 = 4点）
-const DOT_R       = 6;       // ドット半径(px) ※論理ピクセル
-const LINE_W      = 3;       // 線幅
-const SNAP_DIST   = 28;      // スナップ距離(px)
-const PAD_RATIO   = 0.13;    // キャンバスに対するパディング比率
+const DOT_RADIUS         = 5;
+const SNAP_RADIUS        = 0.4;
+const LINE_WIDTH         = 3;
+const MODEL_COLOR        = '#1A73E8';
+const HINT_COLOR         = '#1A73E8';
+const USER_COLOR         = '#FF6B6B';
+const CORRECT_LINE_COLOR = '#22BB55';
+const DOT_COLOR          = '#AACCEE';
+const BG_COLOR           = '#F8FBFF';
 
-const COLOR_BG        = '#FFFFFF';
-const COLOR_DOT       = '#CCCCDD';
-const COLOR_DOT_SNAP  = '#FF6B6B';
-const COLOR_MODEL     = '#2D2D2D';
-const COLOR_USER      = '#4A90D9';
-const COLOR_PREVIEW   = 'rgba(74,144,217,0.45)';
-const COLOR_WRONG     = 'rgba(255,80,80,0.18)';
-const COLOR_HINT      = '#FF8E53';
+const ROW_ANIMALS_4 = ['🐶', '🐱', '🐰', '🐻'];
+const ROW_ANIMALS_5 = ['🐶', '🐱', '🐰', '🐻', '🐼'];
+const COL_NUMBERS_4 = ['１', '２', '３', '４'];
+const COL_NUMBERS_5 = ['１', '２', '３', '４', '５'];
 
 /* ============================================================
-   §2. キャンバス要素取得
+   グリッドヘッダー構築
    ============================================================ */
-function _getCanvas(id) {
-  const el = document.getElementById(id);
-  if (!el) console.error(`[canvas] element not found: #${id}`);
-  return el;
+function buildGridHeaders(problem) {
+  const showHeader = problem.level <= 2;
+  const cols       = problem.grid.cols;
+  const rows       = problem.grid.rows;
+  const animals    = rows === 5 ? ROW_ANIMALS_5 : ROW_ANIMALS_4;
+  const numbers    = cols === 5 ? COL_NUMBERS_5 : COL_NUMBERS_4;
+
+  ['model', 'answer'].forEach(side => {
+    const colHeaderEl = document.getElementById(`col-header-${side}`);
+    const rowHeaderEl = document.getElementById(`row-header-${side}`);
+    if (!colHeaderEl || !rowHeaderEl) return;
+
+    if (!showHeader) {
+      colHeaderEl.style.display = 'none';
+      rowHeaderEl.style.display = 'none';
+      return;
+    }
+
+    colHeaderEl.style.display = 'flex';
+    rowHeaderEl.style.display = 'flex';
+
+    colHeaderEl.innerHTML = '';
+    numbers.forEach(num => {
+      const cell       = document.createElement('div');
+      cell.className   = 'col-header-cell';
+      cell.textContent = num;
+      colHeaderEl.appendChild(cell);
+    });
+
+    rowHeaderEl.innerHTML = '';
+    animals.forEach(animal => {
+      const cell       = document.createElement('div');
+      cell.className   = 'row-header-cell';
+      cell.textContent = animal;
+      rowHeaderEl.appendChild(cell);
+    });
+  });
 }
 
-function _ctx(id) {
-  const el = _getCanvas(id);
-  return el ? el.getContext('2d') : null;
+function syncRowHeaderHeight(side, rows) {
+  const wrap = document.querySelector(
+    side === 'model'
+      ? '#grid-outer-model .canvas-wrap'
+      : '#grid-outer-answer .canvas-wrap'
+  );
+  const rowHeaderEl = document.getElementById(`row-header-${side}`);
+  if (!wrap || !rowHeaderEl) return;
+
+  const canvasSize = wrap.getBoundingClientRect().width || wrap.offsetWidth || 200;
+  const cellH      = canvasSize / rows;
+  const headerSize = parseFloat(
+    getComputedStyle(document.documentElement).getPropertyValue('--header-size')
+  ) || 56;
+
+  Array.from(rowHeaderEl.children).forEach(cell => {
+    cell.style.height     = cellH + 'px';
+    cell.style.minHeight  = cellH + 'px';
+    cell.style.lineHeight = cellH + 'px';
+    cell.style.fontSize   = Math.max(Math.round(headerSize * 0.60), 16) + 'px';
+  });
+}
+
+function syncColHeaderFontSize(side) {
+  const colHeaderEl = document.getElementById(`col-header-${side}`);
+  if (!colHeaderEl) return;
+  const headerSize = parseFloat(
+    getComputedStyle(document.documentElement).getPropertyValue('--header-size')
+  ) || 56;
+  Array.from(colHeaderEl.children).forEach(cell => {
+    cell.style.fontSize   = Math.max(Math.round(headerSize * 0.50), 12) + 'px';
+    cell.style.lineHeight = headerSize + 'px';
+  });
 }
 
 /* ============================================================
-   §3. DPR対応リサイズ
+   ユーティリティ
    ============================================================ */
-/**
- * キャンバス要素を論理サイズ(CSS px)に合わせて
- * DPR(devicePixelRatio)分の解像度でリサイズする
- */
-function _resizeCanvas(canvas, cssW, cssH) {
-  const dpr = window.devicePixelRatio || 1;
-  canvas.width  = Math.round(cssW * dpr);
-  canvas.height = Math.round(cssH * dpr);
-  canvas.style.width  = `${cssW}px`;
-  canvas.style.height = `${cssH}px`;
+function resizeCanvas(canvas) {
+  const wrap = canvas.parentElement;
+  if (!wrap) return 300;
+  let size = wrap.getBoundingClientRect().width;
+  if (!size || size < 10) size = wrap.offsetWidth || 300;
+  const dpr          = window.devicePixelRatio || 1;
+  const physicalSize = Math.round(size * dpr);
+  if (canvas.width !== physicalSize || canvas.height !== physicalSize) {
+    canvas.width  = physicalSize;
+    canvas.height = physicalSize;
+  }
   const ctx = canvas.getContext('2d');
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.scale(dpr, dpr);
-  return { cssW, cssH, dpr };
+  return size;
 }
 
-/**
- * モデル・解答・オーバーレイの3枚を同時リサイズ
- * 基準サイズは .canvas-answer-wrap の実際の幅
- */
-function resizeAll() {
-  const wrap = document.querySelector('.canvas-answer-wrap');
-  const modelEl   = _getCanvas('canvas-model');
-  const answerEl  = _getCanvas('canvas-answer');
-  const overlayEl = _getCanvas('canvas-overlay');
-
-  if (!wrap || !modelEl || !answerEl || !overlayEl) return;
-
-  const size = wrap.clientWidth || 280; // 正方形
-
-  _resizeCanvas(modelEl,   size, size);
-  _resizeCanvas(answerEl,  size, size);
-  _resizeCanvas(overlayEl, size, size);
+function calcGrid(size, grid) {
+  const PAD   = size * 0.12;
+  const inner = size - PAD * 2;
+  const stepX = inner / (grid.cols - 1);
+  const stepY = inner / (grid.rows - 1);
+  return { pad: PAD, stepX, stepY, size };
 }
 
-/* ============================================================
-   §4. グリッド座標計算
-   ============================================================ */
-/**
- * グリッド点(gx, gy)→キャンバス論理座標(px, py) に変換
- */
-function _gridToPx(gx, gy, cssSize) {
-  const pad  = cssSize * PAD_RATIO;
-  const step = (cssSize - pad * 2) / GRID_N;
-  return {
-    x: pad + gx * step,
-    y: pad + gy * step
-  };
+function dotPos(g, col, row) {
+  return { x: g.pad + col * g.stepX, y: g.pad + row * g.stepY };
 }
 
-/**
- * キャンバス論理座標(x,y)→最近グリッド点(gx,gy)
- * SNAP_DIST 以内でなければ null
- */
-function _pxToGrid(x, y, cssSize) {
-  const pad  = cssSize * PAD_RATIO;
-  const step = (cssSize - pad * 2) / GRID_N;
-  let best = null, bestD = SNAP_DIST;
-  for (let gy = 0; gy <= GRID_N; gy++) {
-    for (let gx = 0; gx <= GRID_N; gx++) {
-      const px = pad + gx * step;
-      const py = pad + gy * step;
-      const d  = Math.hypot(x - px, y - py);
-      if (d < bestD) { bestD = d; best = { gx, gy }; }
+function snapToGrid(g, px, py) {
+  const grid = CanvasState.problem.grid;
+  let bestDist = Infinity, bestCol = -1, bestRow = -1;
+  for (let c = 0; c < grid.cols; c++) {
+    for (let r = 0; r < grid.rows; r++) {
+      const p = dotPos(g, c, r);
+      const d = Math.hypot(px - p.x, py - p.y);
+      if (d < bestDist) { bestDist = d; bestCol = c; bestRow = r; }
     }
   }
-  return best;
+  const threshold = Math.min(g.stepX, g.stepY) * SNAP_RADIUS;
+  return bestDist <= threshold ? { col: bestCol, row: bestRow } : null;
 }
 
 /* ============================================================
-   §5. 描画ヘルパー
+   描画ヘルパー
    ============================================================ */
-function _drawBackground(ctx, size) {
-  ctx.fillStyle = COLOR_BG;
+function drawBackground(ctx, size) {
+  ctx.fillStyle = BG_COLOR;
   ctx.fillRect(0, 0, size, size);
 }
 
-function _drawDots(ctx, size, snapPt) {
-  const pad  = size * PAD_RATIO;
-  const step = (size - pad * 2) / GRID_N;
-  for (let gy = 0; gy <= GRID_N; gy++) {
-    for (let gx = 0; gx <= GRID_N; gx++) {
-      const px = pad + gx * step;
-      const py = pad + gy * step;
-      const isSnap = snapPt && snapPt.gx === gx && snapPt.gy === gy;
+function drawDots(ctx, g, grid) {
+  for (let c = 0; c < grid.cols; c++) {
+    for (let r = 0; r < grid.rows; r++) {
+      const p = dotPos(g, c, r);
       ctx.beginPath();
-      ctx.arc(px, py, isSnap ? DOT_R * 1.4 : DOT_R, 0, Math.PI * 2);
-      ctx.fillStyle = isSnap ? COLOR_DOT_SNAP : COLOR_DOT;
+      ctx.arc(p.x, p.y, DOT_RADIUS, 0, Math.PI * 2);
+      ctx.fillStyle = DOT_COLOR;
       ctx.fill();
     }
   }
 }
 
-function _drawLines(ctx, lines, size, color, width) {
-  if (!lines || lines.length === 0) return;
-  const pad  = size * PAD_RATIO;
-  const step = (size - pad * 2) / GRID_N;
+function drawLine(ctx, g, line, color, width, dashed, offsetX = 0, offsetY = 0) {
+  const p1 = dotPos(g, line.x1, line.y1);
+  const p2 = dotPos(g, line.x2, line.y2);
+  ctx.save();
   ctx.strokeStyle = color;
   ctx.lineWidth   = width;
   ctx.lineCap     = 'round';
-  lines.forEach(l => {
-    const x1 = pad + l.x1 * step, y1 = pad + l.y1 * step;
-    const x2 = pad + l.x2 * step, y2 = pad + l.y2 * step;
-    ctx.beginPath();
-    ctx.moveTo(x1, y1);
-    ctx.lineTo(x2, y2);
-    ctx.stroke();
+  ctx.setLineDash(dashed ? [8, 6] : []);
+  ctx.beginPath();
+  ctx.moveTo(p1.x + offsetX, p1.y + offsetY);
+  ctx.lineTo(p2.x + offsetX, p2.y + offsetY);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawEndpoints(ctx, g, lines, color, offsetX = 0, offsetY = 0) {
+  for (const line of lines) {
+    for (const pt of [{ x: line.x1, y: line.y1 }, { x: line.x2, y: line.y2 }]) {
+      const p = dotPos(g, pt.x, pt.y);
+      ctx.beginPath();
+      ctx.arc(p.x + offsetX, p.y + offsetY, DOT_RADIUS + 1, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.fill();
+    }
+  }
+}
+
+function drawPreviewLine(ctx, g, fromDot, toPx) {
+  const p1 = dotPos(g, fromDot.col, fromDot.row);
+  ctx.save();
+  ctx.strokeStyle = USER_COLOR;
+  ctx.lineWidth   = LINE_WIDTH;
+  ctx.lineCap     = 'round';
+  ctx.globalAlpha = 0.6;
+  ctx.setLineDash([6, 5]);
+  ctx.beginPath();
+  ctx.moveTo(p1.x, p1.y);
+  ctx.lineTo(toPx.x, toPx.y);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function syncHeaders(problem) {
+  if (problem.level > 2) return;
+  ['model', 'answer'].forEach(side => {
+    syncRowHeaderHeight(side, problem.grid.rows);
+    syncColHeaderFontSize(side);
   });
 }
 
-function _drawHintLines(ctx, lines, size) {
-  if (!lines || lines.length === 0) return;
-  _drawLines(ctx, lines, size, COLOR_HINT, LINE_W * 1.5);
-}
-
-function _drawPreviewLine(ctx, startPt, currentPt, size) {
-  if (!startPt || !currentPt) return;
-  const pad  = size * PAD_RATIO;
-  const step = (size - pad * 2) / GRID_N;
-  const x1 = pad + startPt.gx * step, y1 = pad + startPt.gy * step;
-  ctx.strokeStyle = COLOR_PREVIEW;
-  ctx.lineWidth   = LINE_W;
-  ctx.lineCap     = 'round';
-  ctx.setLineDash([6, 4]);
-  ctx.beginPath();
-  ctx.moveTo(x1, y1);
-  ctx.lineTo(currentPt.x, currentPt.y);
-  ctx.stroke();
-  ctx.setLineDash([]);
-}
-
 /* ============================================================
-   §6. 公開: モデル描画
+   公開: 見本キャンバス描画
    ============================================================ */
 function drawModel(problem) {
-  const canvas = _getCanvas('canvas-model');
-  if (!canvas) return;
-  const ctx  = canvas.getContext('2d');
-  const size = canvas.clientWidth || canvas.width;
+  const canvas = document.getElementById('canvas-model');
+  const size   = resizeCanvas(canvas);
+  const ctx    = canvas.getContext('2d');
+  const g      = calcGrid(size, problem.grid);
 
-  _drawBackground(ctx, size);
-  _drawDots(ctx, size, null);
-  if (problem && Array.isArray(problem.lines)) {
-    _drawLines(ctx, problem.lines, size, COLOR_MODEL, LINE_W);
+  drawBackground(ctx, size);
+  drawDots(ctx, g, problem.grid);
+  for (const line of problem.lines) {
+    drawLine(ctx, g, line, MODEL_COLOR, LINE_WIDTH + 1, false);
   }
-  if (problem && Array.isArray(problem.hintLines)) {
-    _drawHintLines(ctx, problem.hintLines, size);
-  }
+  drawEndpoints(ctx, g, problem.lines, MODEL_COLOR);
+  syncHeaders(problem);
 }
 
 /* ============================================================
-   §7. 公開: 解答キャンバス描画
+   公開: 回答キャンバス描画
    ============================================================ */
-function drawAnswer() {
-  const canvas = _getCanvas('canvas-answer');
-  if (!canvas) return;
-  const ctx  = canvas.getContext('2d');
-  const size = canvas.clientWidth || canvas.width;
+function drawAnswer(problem) {
+  const canvas = document.getElementById('canvas-answer');
+  const size   = resizeCanvas(canvas);
+  const ctx    = canvas.getContext('2d');
+  const g      = calcGrid(size, problem.grid);
 
-  _drawBackground(ctx, size);
-  _drawDots(ctx, size, CanvasState.dragging ? CanvasState.currentGridPt : null);
-  _drawLines(ctx, CanvasState.userLines, size, COLOR_USER, LINE_W);
+  drawBackground(ctx, size);
+  drawDots(ctx, g, problem.grid);
+
+  const hintLines = problem.hintLines || [];
+  for (const line of hintLines) {
+    drawLine(ctx, g, line, HINT_COLOR, LINE_WIDTH + 1, false);
+  }
+  drawEndpoints(ctx, g, hintLines, HINT_COLOR);
+
+  for (const line of CanvasState.userLines) {
+    drawLine(ctx, g, line, USER_COLOR, LINE_WIDTH, false);
+  }
+  drawEndpoints(ctx, g, CanvasState.userLines, USER_COLOR);
+
+  syncHeaders(problem);
 }
 
-function _drawOverlay() {
-  const canvas = _getCanvas('canvas-overlay');
-  if (!canvas) return;
-  const ctx  = canvas.getContext('2d');
-  const size = canvas.clientWidth || canvas.width;
-
+/* ============================================================
+   オーバーレイ描画
+   ============================================================ */
+function drawOverlay(problem, toPx) {
+  const canvas = document.getElementById('canvas-overlay');
+  const size   = resizeCanvas(canvas);
+  const ctx    = canvas.getContext('2d');
   ctx.clearRect(0, 0, size, size);
-  if (CanvasState.dragging) {
-    _drawPreviewLine(ctx, CanvasState.startPt, CanvasState.currentPt, size);
-  }
+
+  if (!CanvasState.dragging || !CanvasState.startPt) return;
+
+  const g      = calcGrid(size, problem.grid);
+  const startP = dotPos(g, CanvasState.startPt.col, CanvasState.startPt.row);
+
+  ctx.beginPath();
+  ctx.arc(startP.x, startP.y, DOT_RADIUS + 4, 0, Math.PI * 2);
+  ctx.strokeStyle = USER_COLOR;
+  ctx.lineWidth   = 2;
+  ctx.stroke();
+
+  if (toPx) drawPreviewLine(ctx, g, CanvasState.startPt, toPx);
 }
 
 /* ============================================================
-   §8. 公開: 不正解フィードバック
+   公開: インタラクション設定
    ============================================================ */
-function drawWrongFeedback() {
-  const canvas = _getCanvas('canvas-answer');
-  if (!canvas) return;
-  const ctx  = canvas.getContext('2d');
-  const size = canvas.clientWidth || canvas.width;
-  ctx.fillStyle = COLOR_WRONG;
-  ctx.fillRect(0, 0, size, size);
-  setTimeout(drawAnswer, 600);
-}
+function setupInteraction(problem, onLineAdded) {
+  CanvasState.problem = problem;
 
-/* ============================================================
-   §9. タッチ / マウス座標取得
-   ============================================================ */
-function _getEventPos(e, canvas) {
-  const rect = canvas.getBoundingClientRect();
-  const touch = e.touches ? e.touches[0] : e;
-  return {
-    x: touch.clientX - rect.left,
-    y: touch.clientY - rect.top
+  const oldOv = document.getElementById('canvas-overlay');
+  const newOv = oldOv.cloneNode(true);
+  oldOv.parentNode.replaceChild(newOv, oldOv);
+  const ov = document.getElementById('canvas-overlay');
+
+  // 差分7修正: pointer-events を明示的に auto に設定
+  ov.style.pointerEvents = 'auto';
+  ov.style.cursor        = 'crosshair';
+
+  const getPos = (e) => {
+    const rect  = ov.getBoundingClientRect();
+    const touch = e.touches ? e.touches[0] : e;
+    return { x: touch.clientX - rect.left, y: touch.clientY - rect.top };
   };
-}
 
-/* ============================================================
-   §10. インタラクション設定
-   ============================================================ */
-function setupInteraction() {
-  const canvas = _getCanvas('canvas-overlay');
-  if (!canvas) return;
-
-  // 既存リスナーをクリアするため clone で差し替え
-  const fresh = canvas.cloneNode(true);
-  canvas.parentNode.replaceChild(fresh, canvas);
-  fresh.style.pointerEvents = 'auto'; // タッチ受付
-
-  function onStart(e) {
+  const onStart = (e) => {
     e.preventDefault();
-    const answerCanvas = _getCanvas('canvas-answer');
-    if (!answerCanvas) return;
-    const size = answerCanvas.clientWidth || answerCanvas.width;
-    const pos  = _getEventPos(e, fresh);
-    const grid = _pxToGrid(pos.x, pos.y, size);
-    if (!grid) return;
-    CanvasState.dragging       = true;
-    CanvasState.startPt        = grid;
-    CanvasState.currentPt      = pos;
-    CanvasState.currentGridPt  = grid;
-    drawAnswer();
-    _drawOverlay();
-  }
+    const pos  = getPos(e);
+    const size = ov.getBoundingClientRect().width || ov.offsetWidth || 300;
+    const g    = calcGrid(size, problem.grid);
+    const snap = snapToGrid(g, pos.x, pos.y);
+    if (!snap) return;
+    CanvasState.dragging  = true;
+    CanvasState.startPt   = snap;
+    CanvasState.currentPt = pos;
+    drawOverlay(problem, pos);
+  };
 
-  function onMove(e) {
+  const onMove = (e) => {
     e.preventDefault();
     if (!CanvasState.dragging) return;
-    const answerCanvas = _getCanvas('canvas-answer');
-    if (!answerCanvas) return;
-    const size = answerCanvas.clientWidth || answerCanvas.width;
-    const pos  = _getEventPos(e, fresh);
-    const grid = _pxToGrid(pos.x, pos.y, size);
-    CanvasState.currentPt     = pos;
-    CanvasState.currentGridPt = grid || CanvasState.currentGridPt;
-    drawAnswer();
-    _drawOverlay();
-  }
+    const pos = getPos(e);
+    CanvasState.currentPt = pos;
+    drawOverlay(problem, pos);
+  };
 
-  function onEnd(e) {
+  const onEnd = (e) => {
     e.preventDefault();
     if (!CanvasState.dragging) return;
-    const answerCanvas = _getCanvas('canvas-answer');
-    if (!answerCanvas) return;
-    const size  = answerCanvas.clientWidth || answerCanvas.width;
-    const pos   = _getEventPos(e.changedTouches ? { touches: e.changedTouches } : e, fresh);
-    const grid  = _pxToGrid(pos.x, pos.y, size);
     CanvasState.dragging = false;
 
-    if (grid && CanvasState.startPt) {
-      const s = CanvasState.startPt;
-      const g = grid;
-      // 同一点でなければ追加
-      if (!(s.gx === g.gx && s.gy === g.gy)) {
-        CanvasState.userLines.push({ x1: s.gx, y1: s.gy, x2: g.gx, y2: g.gy });
-      }
+    const rect   = ov.getBoundingClientRect();
+    const rawPos = e.changedTouches
+      ? { x: e.changedTouches[0].clientX - rect.left,
+          y: e.changedTouches[0].clientY - rect.top }
+      : CanvasState.currentPt;
+
+    const overlayCtx = ov.getContext('2d');
+    overlayCtx.clearRect(0, 0, ov.width, ov.height);
+
+    if (!rawPos) return;
+    const size    = rect.width || ov.offsetWidth || 300;
+    const g       = calcGrid(size, problem.grid);
+    const endSnap = snapToGrid(g, rawPos.x, rawPos.y);
+    if (!endSnap) return;
+
+    const s = CanvasState.startPt;
+    if (s.col === endSnap.col && s.row === endSnap.row) return;
+
+    CanvasState.userLines.push({
+      x1: s.col, y1: s.row,
+      x2: endSnap.col, y2: endSnap.row
+    });
+
+    drawAnswer(problem);
+    if (typeof onLineAdded === 'function') onLineAdded(CanvasState.userLines.length);
+  };
+
+  ov.addEventListener('mousedown',  onStart, { passive: false });
+  ov.addEventListener('mousemove',  onMove,  { passive: false });
+  ov.addEventListener('mouseup',    onEnd,   { passive: false });
+  ov.addEventListener('mouseleave', onEnd,   { passive: false });
+  ov.addEventListener('touchstart', onStart, { passive: false });
+  ov.addEventListener('touchmove',  onMove,  { passive: false });
+  ov.addEventListener('touchend',   onEnd,   { passive: false });
+}
+
+/* ============================================================
+   公開: 回答線の取得・操作
+   ============================================================ */
+function getAnswerLines()   { return [...CanvasState.userLines]; }
+
+function undoLastLine() {
+  if (CanvasState.userLines.length === 0) return;
+  CanvasState.userLines.pop();
+  drawAnswer(CanvasState.problem);
+}
+
+function clearAnswerLines() {
+  CanvasState.userLines = [];
+  if (CanvasState.problem) drawAnswer(CanvasState.problem);
+}
+
+/* ============================================================
+   公開: 不正解フィードバック描画
+   ============================================================ */
+function drawWrongFeedback(problem, userLines) {
+  const canvas = document.getElementById('canvas-wrong');
+  const dpr    = window.devicePixelRatio || 1;
+  const parentW = canvas.parentElement
+    ? (canvas.parentElement.getBoundingClientRect().width
+       || canvas.parentElement.offsetWidth || 280)
+    : 280;
+  const W = Math.min(Math.round(parentW * 0.85), 280);
+
+  canvas.width        = Math.round(W * dpr);
+  canvas.height       = Math.round(W * dpr);
+  canvas.style.width  = W + 'px';
+  canvas.style.height = W + 'px';
+
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+
+  const g = calcGrid(W, problem.grid);
+  drawBackground(ctx, W);
+  drawDots(ctx, g, problem.grid);
+
+  const OX = 4, OY = 4;
+  for (const line of userLines) {
+    drawLine(ctx, g, line, '#FF9999', LINE_WIDTH, false, OX, OY);
+  }
+  for (const line of userLines) {
+    for (const pt of [{ x: line.x1, y: line.y1 }, { x: line.x2, y: line.y2 }]) {
+      const p = dotPos(g, pt.x, pt.y);
+      ctx.beginPath();
+      ctx.arc(p.x + OX, p.y + OY, DOT_RADIUS, 0, Math.PI * 2);
+      ctx.fillStyle = '#FF9999';
+      ctx.fill();
     }
-    CanvasState.startPt   = null;
-    CanvasState.currentPt = null;
-    drawAnswer();
-    _drawOverlay();
   }
 
-  // マウス
-  fresh.addEventListener('mousedown',  onStart, { passive: false });
-  fresh.addEventListener('mousemove',  onMove,  { passive: false });
-  fresh.addEventListener('mouseup',    onEnd,   { passive: false });
-  fresh.addEventListener('mouseleave', onEnd,   { passive: false });
-
-  // タッチ
-  fresh.addEventListener('touchstart', onStart, { passive: false });
-  fresh.addEventListener('touchmove',  onMove,  { passive: false });
-  fresh.addEventListener('touchend',   onEnd,   { passive: false });
+  for (const line of problem.lines) {
+    drawLine(ctx, g, line, CORRECT_LINE_COLOR, LINE_WIDTH + 2, false);
+  }
+  drawEndpoints(ctx, g, problem.lines, CORRECT_LINE_COLOR);
 }
 
 /* ============================================================
-   §11. 公開: 解答取得 / 操作
+   ResizeObserver
    ============================================================ */
-function getAnswerLines()  { return CanvasState.userLines.slice(); }
-function clearAnswerLines() { CanvasState.userLines = []; drawAnswer(); }
-function undoLastLine()     { CanvasState.userLines.pop(); drawAnswer(); }
-
-/* ============================================================
-   §12. ResizeObserver（ウィンドウリサイズ対応）
-   ============================================================ */
-let _resizeTimer = null;
-function _onResize() {
-  clearTimeout(_resizeTimer);
-  _resizeTimer = setTimeout(() => {
-    resizeAll();
+function setupResizeObserver() {
+  const redraw = () => {
+    if (!CanvasState.problem) return;
     drawModel(CanvasState.problem);
-    drawAnswer();
-  }, 80);
-}
+    drawAnswer(CanvasState.problem);
+  };
 
-/* ============================================================
-   §13. 公開: キャンバス初期化（問題切り替え時）
-   ============================================================ */
-/**
- * v2.2 修正:
- *   ステートリセットに加えて resizeAll()・drawModel()・drawAnswer()・
- *   setupInteraction() を内部実行するため、app.js からは
- *   initCanvases(problem) を呼ぶだけでキャンバスが完全に連動する
- */
-function initCanvases(problem) {
-  // ステートリセット
-  CanvasState.userLines  = [];
-  CanvasState.dragging   = false;
-  CanvasState.startPt    = null;
-  CanvasState.currentPt  = null;
-  CanvasState.problem    = problem;
-
-  // リサイズ → 描画 → インタラクション設定
-  resizeAll();
-  drawModel(problem);
-  drawAnswer();
-  setupInteraction();
-}
-
-/* ============================================================
-   §14. DOMContentLoaded 初期化
-   ============================================================ */
-document.addEventListener('DOMContentLoaded', () => {
-  // ResizeObserver で canvas-answer-wrap を監視
-  const wrap = document.querySelector('.canvas-answer-wrap');
-  if (wrap && window.ResizeObserver) {
-    const ro = new ResizeObserver(_onResize);
-    ro.observe(wrap);
+  if (window.ResizeObserver) {
+    const targets = [
+      document.getElementById('canvas-model')?.parentElement,
+      document.getElementById('canvas-answer')?.parentElement
+    ].filter(Boolean);
+    const ro = new ResizeObserver(redraw);
+    targets.forEach(el => ro.observe(el));
   } else {
-    window.addEventListener('resize', _onResize);
+    window.addEventListener('resize', redraw);
   }
+}
 
-  // グローバル公開（app.js から参照）
-  window.drawModel       = drawModel;
-  window.drawAnswer      = drawAnswer;
-  window.initCanvases    = initCanvases;
-  window.setupInteraction= setupInteraction;
-  window.getAnswerLines  = getAnswerLines;
-  window.clearAnswerLines= clearAnswerLines;
-  window.undoLastLine    = undoLastLine;
-  window.drawWrongFeedback = drawWrongFeedback;
-  window.resizeAll       = resizeAll;
-});
+/* ============================================================
+   公開: キャンバス初期化
+   ============================================================ */
+function initCanvases(problem) {
+  CanvasState.userLines = [];
+  CanvasState.dragging  = false;
+  CanvasState.startPt   = null;
+  CanvasState.currentPt = null;
+  CanvasState.problem   = problem;
+}
+
+document.addEventListener('DOMContentLoaded', setupResizeObserver);
