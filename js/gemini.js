@@ -337,7 +337,9 @@ async function generateProblems(level = 0) {
   const apiKey = loadApiKey();
   if (!apiKey) {
     return {
-      problems   : _FALLBACK_BANK.slice(0, TARGET_COUNT),
+      problems   : (typeof getProblems === 'function')
+                     ? getProblems(level)
+                     : _FALLBACK_BANK.slice(0, TARGET_COUNT),
       validCount : 0,
       alertType  : null
     };
@@ -432,14 +434,18 @@ async function generateProblems(level = 0) {
 
   const validCount = collectedValid.length;
 
+  /* ── 全モデル失敗 ── */
   if (validCount === 0) {
     return {
-      problems   : _FALLBACK_BANK.slice(0, TARGET_COUNT),
+      problems   : (typeof getProblems === 'function')
+                     ? getProblems(level)
+                     : _FALLBACK_BANK.slice(0, TARGET_COUNT),
       validCount : 0,
       alertType  : lastAlertType
     };
   }
 
+  /* ── 問題数不足：ローカル問題で補完 ── */
   const ratio = validCount / TARGET_COUNT;
   if (ratio < LEVEL_ALERT_RATIO) {
     const alertType = 'LEVEL';
@@ -451,8 +457,15 @@ async function generateProblems(level = 0) {
       rawJson : lastRawJson
     });
     const result = collectedValid.slice(0, TARGET_COUNT);
-    while (result.length < TARGET_COUNT) {
-      result.push(_FALLBACK_BANK[result.length % _FALLBACK_BANK.length]);
+    if (result.length < TARGET_COUNT) {
+      const localPool = (typeof getProblems === 'function')
+        ? getProblems(level)
+        : _FALLBACK_BANK.slice(0, TARGET_COUNT);
+      let i = 0;
+      while (result.length < TARGET_COUNT) {
+        result.push(localPool[i % localPool.length]);
+        i++;
+      }
     }
     return { problems: result, validCount, alertType };
   }
