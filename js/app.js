@@ -1,12 +1,11 @@
 /* ============================================================
-   app.js  v3.0  ―  完全統合版
+   app.js  v3.1  ―  BUG-1/2/3 修正版
    ============================================================ */
 
 /* ---------- 定数 ---------- */
 const GEMINI_TIMEOUT_MS  = 20000;
-const LOCAL_PROBLEMS_KEY = 'localProblems';
 
-/* ---------- アプリ状態（単一定義） ---------- */
+/* ---------- アプリ状態 ---------- */
 const AppState = {
   level        : 1,
   problems     : [],
@@ -47,14 +46,10 @@ function showLoading(show) {
 function showErrorBanner(message, type = 'error') {
   const banner = document.getElementById('model-error-banner');
   if (!banner) return;
-  const txt = banner.querySelector('.banner-text');
-  if (txt) {
-    txt.textContent = type === 'error'
-      ? `⚠️ AI: ${message}`
-      : `💡 ${message}`;
-  } else {
-    banner.textContent = message;
-  }
+  banner.textContent = type === 'error'
+    ? `⚠️ AI: ${message}　（タップして管理者設定）`
+    : `💡 ${message}　（タップして管理者設定）`;
+  banner.className = `model-error-banner model-error-banner--${type}`;
   banner.classList.remove('hidden');
 }
 
@@ -69,14 +64,12 @@ function hideErrorBanner() {
 function updateProgress() {
   const total = AppState.problems.length;
   const cur   = AppState.currentIndex + 1;
-  const pt    = document.getElementById('progress-text');
-  const pb    = document.getElementById('progress-bar');
-  const st    = document.getElementById('score-text');
-  const qn    = document.getElementById('question-number');
+  const pt = document.getElementById('progress-text');
+  const pb = document.getElementById('progress-bar');
+  const st = document.getElementById('score-text');
   if (pt) pt.textContent = `${cur} / ${total}もん`;
   if (pb) pb.style.width = `${(cur / total) * 100}%`;
   if (st) st.textContent = `⭐ ${AppState.score}`;
-  if (qn) qn.textContent = `${cur} / ${total}`;
 }
 
 /* ============================================================
@@ -138,7 +131,8 @@ function judgeAnswer(problem, userLines) {
 function loadQuestion(index) {
   const problem = AppState.problems[index];
   if (!problem) {
-    console.error('loadQuestion: problem is undefined for index', index);
+    console.error('loadQuestion: problem undefined at index', index,
+                  'problems:', AppState.problems);
     return;
   }
   AppState.currentIndex = index;
@@ -163,9 +157,9 @@ function loadQuestion(index) {
    答え合わせ
    ============================================================ */
 function checkAnswer() {
-  const problem   = AppState.problems[AppState.currentIndex];
+  const problem = AppState.problems[AppState.currentIndex];
   if (!problem) return;
-  const userLines = getUserLines();
+  const userLines = getAnswerLines();
   const isCorrect = judgeAnswer(problem, userLines);
 
   const overlay = document.getElementById('feedback-overlay');
@@ -175,19 +169,15 @@ function checkAnswer() {
     AppState.score++;
     const st = document.getElementById('score-text');
     if (st) st.textContent = `⭐ ${AppState.score}`;
-    const fw = document.getElementById('feedback-wrong');
-    const fc = document.getElementById('feedback-correct');
-    if (fw) fw.classList.add('hidden');
-    if (fc) fc.classList.remove('hidden');
+    document.getElementById('feedback-wrong')?.classList.add('hidden');
+    document.getElementById('feedback-correct')?.classList.remove('hidden');
     const pt = document.getElementById('praise-text');
     if (pt) pt.textContent = randomPraise();
     const img = document.querySelector('.gotit-img');
     if (img) { img.style.animation = 'none'; img.offsetHeight; img.style.animation = ''; }
   } else {
-    const fw = document.getElementById('feedback-wrong');
-    const fc = document.getElementById('feedback-correct');
-    if (fc) fc.classList.add('hidden');
-    if (fw) fw.classList.remove('hidden');
+    document.getElementById('feedback-correct')?.classList.add('hidden');
+    document.getElementById('feedback-wrong')?.classList.remove('hidden');
     if (typeof drawWrongFeedback === 'function') {
       drawWrongFeedback(problem, userLines);
     }
@@ -198,14 +188,10 @@ function checkAnswer() {
    次の問題へ
    ============================================================ */
 function goNext() {
-  const overlay = document.getElementById('feedback-overlay');
-  if (overlay) overlay.classList.add('hidden');
+  document.getElementById('feedback-overlay')?.classList.add('hidden');
   const next = AppState.currentIndex + 1;
-  if (next >= AppState.problems.length) {
-    showResult();
-  } else {
-    loadQuestion(next);
-  }
+  if (next >= AppState.problems.length) showResult();
+  else loadQuestion(next);
 }
 
 /* ============================================================
@@ -227,7 +213,7 @@ function showResult() {
 }
 
 /* ============================================================
-   ゲーム開始
+   ゲーム開始  ★ BUG-1/2/3 修正箇所
    ============================================================ */
 async function startGame() {
   const level = AppState.level;
@@ -236,8 +222,8 @@ async function startGame() {
 
   let problems = null;
 
-  /* ── Gemini 生成 ── */
-  const apiKey = (typeof getApiKey === 'function') ? getApiKey() : AppState.apiKey;
+  /* ── Gemini 生成（APIキーがある場合のみ） ── */
+  const apiKey = (typeof loadApiKey === 'function') ? loadApiKey() : AppState.apiKey;
   if (apiKey) {
     try {
       const result = await Promise.race([
@@ -246,20 +232,32 @@ async function startGame() {
           setTimeout(() => rej(new Error('timeout')), GEMINI_TIMEOUT_MS)
         ),
       ]);
-      if (Array.isArray(result)) {
-        problems = result;
-      } else if (result && Array.isArray(result.problems)) {
+      /* ★ BUG-2修正: generateProblems はオブジェクトを返す */
+      if (result && Array.isArray(result.problems) && result.problems.length > 0) {
         problems = result.problems;
+        if (result.alertType) {
+          showErrorBanner(
+            result.alertType === 'MODEL'  ? 'AIモデルを変更してください' :
+            result.alertType === 'PROMPT' ? 'AI出力が不正です。管理者設定を確認してください' :
+            result.alertType === 'LEVEL'  ? '有効な問題数が少ないです' :
+            result.alertType,
+            'error'
+          );
+        }
+      } else if (Array.isArray(result) && result.length > 0) {
+        problems = result; // 万が一配列で返った場合の保険
       }
     } catch (e) {
       console.warn('Gemini 失敗:', e.message);
+      showErrorBanner('AI生成に失敗しました。ローカル問題を使用します。', 'info');
     }
   }
 
-  /* ── ローカル fallback ── */
+  /* ── ★ BUG-1/3修正: ローカル問題フォールバック ──
+   * LOCAL_PROBLEMS は存在しないため getProblems() を使用する */
   if (!problems || !problems.length) {
-    if (typeof LOCAL_PROBLEMS !== 'undefined' && Array.isArray(LOCAL_PROBLEMS)) {
-      problems = LOCAL_PROBLEMS.filter(p => p.level === level);
+    if (typeof getProblems === 'function') {
+      problems = getProblems(level);
     }
   }
 
@@ -311,25 +309,19 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   /* はじめる */
-  const startBtn = document.getElementById('btn-start');
-  if (startBtn) startBtn.addEventListener('click', startGame);
+  document.getElementById('btn-start')
+    ?.addEventListener('click', startGame);
 
   /* APIキー */
-  const toggleApi = document.getElementById('btn-toggle-api');
-  if (toggleApi) {
-    toggleApi.addEventListener('click', () => {
-      const panel = document.getElementById('api-key-panel') ||
-                    document.getElementById('api-panel');
-      if (panel) panel.classList.toggle('hidden');
+  document.getElementById('btn-toggle-api')
+    ?.addEventListener('click', () => {
+      document.getElementById('api-key-panel')?.classList.toggle('hidden');
     });
-  }
 
-  const saveApiBtn = document.getElementById('btn-save-api');
-  if (saveApiBtn) {
-    saveApiBtn.addEventListener('click', () => {
-      const input = document.getElementById('input-api-key') ||
-                    document.getElementById('api-key-input');
-      const key = input ? input.value.trim() : '';
+  document.getElementById('btn-save-api')
+    ?.addEventListener('click', () => {
+      const input = document.getElementById('input-api-key');
+      const key   = input ? input.value.trim() : '';
       if (key) {
         if (typeof saveApiKey === 'function') saveApiKey(key);
         AppState.apiKey = key;
@@ -341,14 +333,12 @@ document.addEventListener('DOMContentLoaded', () => {
         alert('APIキーをクリアしました。');
       }
     });
-  }
 
   /* 保存済みAPIキーの読み込み */
-  const savedKey = (typeof getApiKey === 'function') ? getApiKey() : '';
+  const savedKey = (typeof loadApiKey === 'function') ? loadApiKey() : '';
   if (savedKey) {
     AppState.apiKey = savedKey;
-    const inputEl = document.getElementById('input-api-key') ||
-                    document.getElementById('api-key-input');
+    const inputEl = document.getElementById('input-api-key');
     if (inputEl) inputEl.value = savedKey;
   }
 
@@ -358,7 +348,7 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('model-error-banner')
     ?.addEventListener('click', () => window.open('admin.html', '_blank'));
 
-  /* ゲーム画面 */
+  /* ゲーム操作 */
   document.getElementById('btn-home')
     ?.addEventListener('click', () => {
       if (confirm('ホームに戻りますか？')) showScreen('screen-start');
@@ -366,26 +356,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
   document.getElementById('btn-clear')
     ?.addEventListener('click', () => {
-      if (typeof clearAnswerLines === 'function') clearAnswerLines();
-      else if (typeof clearUserLines === 'function') {
-        const p = AppState.problems[AppState.currentIndex];
-        if (p) clearUserLines(p);
-      }
-      const problem = AppState.problems[AppState.currentIndex];
-      if (problem) _refreshOverlayLimit(problem, 0);
+      clearAnswerLines();
+      const p = AppState.problems[AppState.currentIndex];
+      if (p) _refreshOverlayLimit(p, 0);
     });
 
   document.getElementById('btn-undo')
     ?.addEventListener('click', () => {
-      if (typeof undoLastLine === 'function') undoLastLine();
-      else if (typeof CanvasState !== 'undefined') {
-        CanvasState.userLines.pop();
-        const p = AppState.problems[AppState.currentIndex];
-        if (p) drawAnswer(p);
-      }
-      const problem   = AppState.problems[AppState.currentIndex];
-      const lineCount = (typeof getUserLines === 'function') ? getUserLines().length : 0;
-      if (problem) _refreshOverlayLimit(problem, lineCount);
+      undoLastLine();
+      const p   = AppState.problems[AppState.currentIndex];
+      const cnt = getAnswerLines().length;
+      if (p) _refreshOverlayLimit(p, cnt);
     });
 
   document.getElementById('btn-check')
@@ -397,19 +378,22 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('btn-next-correct')
     ?.addEventListener('click', goNext);
 
-  /* 旧版IDにも対応 */
-  document.getElementById('btn-next')
-    ?.addEventListener('click', goNext);
-
   /* 結果画面 */
   document.getElementById('btn-retry')
     ?.addEventListener('click', () => {
-      AppState.score = 0;
+      AppState.score        = 0;
       AppState.currentIndex = 0;
       showScreen('screen-start');
     });
   document.getElementById('btn-result-home')
     ?.addEventListener('click', () => showScreen('screen-start'));
+
+  /* geminiStatusUpdate イベント監視 */
+  window.addEventListener('geminiStatusUpdate', (e) => {
+    const status = e.detail;
+    if (!status) return;
+    if (status.alertType) showErrorBanner(status.lastError || status.alertType, 'error');
+  });
 
   /* デフォルトレベル選択（Lv1） */
   const defaultLvBtn = document.querySelector('.level-btn[data-level="1"]');
