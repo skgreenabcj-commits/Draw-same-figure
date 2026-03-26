@@ -33,9 +33,9 @@ const EXCLUDED_KEYWORDS  = ['pro', 'image'];
 const PREFERRED_KEYWORDS = ['flash-lite', 'flash'];
 
 const FALLBACK_CHAIN = [
-  'gemini-1.5-flash-latest',
-  'gemini-1.5-flash',
-  'gemini-1.0-pro'
+  'gemini-2.0-flash-lite',
+  'gemini-2.0-flash',
+  'gemini-1.5-flash'
 ];
 
 /* ★ BUG-B2修正: problems.js の仕様に合わせて lines数・intersections を修正
