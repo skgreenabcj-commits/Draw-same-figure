@@ -44,11 +44,14 @@ function showLoading(show) {
    エラーバナー
    ============================================================ */
 function showErrorBanner(message, type = 'error') {
-  const banner = document.getElementById('model-error-banner');
+  const banner  = document.getElementById('model-error-banner');
+  const textEl  = document.getElementById('model-error-banner-text');
   if (!banner) return;
-  banner.textContent = type === 'error'
-    ? `⚠️ AI: ${message}　（タップして管理者設定）`
-    : `💡 ${message}　（タップして管理者設定）`;
+  if (textEl) {
+    textEl.textContent = type === 'error'
+      ? `⚠️ AI: ${message}　（タップして管理者設定）`
+      : `💡 ${message}　（タップして管理者設定）`;
+  }
   banner.className = `model-error-banner model-error-banner--${type}`;
   banner.classList.remove('hidden');
 }
