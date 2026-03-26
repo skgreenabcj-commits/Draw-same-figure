@@ -1,18 +1,20 @@
 /**
- * gemini.js  v5.10.0
- * 変更点 (v5.9.3 → v5.10.0):
- *   BUG-B1: _normalize(prob, level) に level 引数を追加。
- *           grid / level / hintLines を付与するよう修正。
- *           → Gemini生成問題で problem.grid.cols undefined クラッシュを解消。
- *   BUG-B2: LEVEL_CFG の Lv2/Lv3 lines数を problems.js と一致させた。
- *           Lv2: lines:5→4, intersections:[2,8]→[2,5]
- *           Lv3: lines:6→5, intersections:[3,12]→[0,8]
- *   BUG-B3: _makePrompt がLv3でも4×4を指示していた問題を修正。
- *           gridSize / maxCoord をレベルに応じて動的に決定。
+ * gemini.js  v5.11.0
+ * 変更点 (v5.10.0 → v5.11.0):
+ *   FIX-H1: _normalize で hintLines を正しく付与。
+ *            LEVEL_CFG[level].hints 本数だけ lines の先頭から切り出す。
+ *            旧: prob.hintLines = prob.hintLines || []  ← 常に空配列
+ *            新: LEVEL_CFG を参照して hintCount 本をスライス
+ *   FIX-C1: _isCollinearOverlap を新設。
+ *            同一直線上にあり共有点・共有区間を持つ2線分を検出する。
+ *            （端点のみ共有でも同一直線上なら幼児が視覚的に識別困難）
+ *   FIX-C2: _hasCollision を新設。問題内の全線分ペアを _isCollinearOverlap で検査。
+ *   FIX-C3: _validate にコリジョン除外を追加。
+ *            _hasCollision が true の問題は不正問題として除外する。
  */
 
 /* ============================================================
-   §0. 定数
+   §0. 定数  ※変更なし
    ============================================================ */
 const API_BASE_URL   = 'https://generativelanguage.googleapis.com';
 const MODEL_LIST_URL = `${API_BASE_URL}/v1beta/models`;
@@ -38,20 +40,15 @@ const FALLBACK_CHAIN = [
   'gemini-1.5-flash'
 ];
 
-/* ★ BUG-B2修正: problems.js の仕様に合わせて lines数・intersections を修正
-   Lv0: 3本, 4×4, 交差0-3
-   Lv1: 4本, 4×4, 交差0-5
-   Lv2: 4本, 4×4, 交差2-5  (旧: lines:5, intersections:[2,8])
-   Lv3: 5本, 5×5, 交差0-8  (旧: lines:6, intersections:[3,12]) */
 const LEVEL_CFG = [
-  { lines: 3, hints: 2, intersections: [0, 3]  },  // Lv0
-  { lines: 4, hints: 2, intersections: [0, 5]  },  // Lv1
-  { lines: 4, hints: 0, intersections: [2, 5]  },  // Lv2 ★修正
-  { lines: 5, hints: 0, intersections: [0, 8]  }   // Lv3 ★修正
+  { lines: 3, hints: 2, intersections: [0, 3] },  // Lv0
+  { lines: 4, hints: 2, intersections: [0, 5] },  // Lv1
+  { lines: 4, hints: 0, intersections: [2, 5] },  // Lv2
+  { lines: 5, hints: 0, intersections: [0, 8] }   // Lv3
 ];
 
 /* ============================================================
-   §1. アラートログ
+   §1. アラートログ  ※変更なし
    ============================================================ */
 function getAlertLogKey() { return ALERT_LOG_KEY; }
 
@@ -74,7 +71,7 @@ function _appendAlertLog(entry) {
 }
 
 /* ============================================================
-   §2. ステータス管理
+   §2. ステータス管理  ※変更なし
    ============================================================ */
 let _status = {
   errorCount       : 0,
@@ -115,7 +112,7 @@ function _saveModel(model) {
 }
 
 /* ============================================================
-   §3. API キー
+   §3. API キー  ※変更なし
    ============================================================ */
 function saveApiKey(key) {
   try { localStorage.setItem(API_KEY_STORAGE, key); } catch (_) {}
@@ -128,7 +125,7 @@ function clearApiKey() {
 }
 
 /* ============================================================
-   §4. モデルキャッシュ
+   §4. モデルキャッシュ  ※変更なし
    ============================================================ */
 function clearModelCache() {
   try { localStorage.removeItem(MODEL_CACHE_KEY); } catch (_) {}
@@ -145,7 +142,7 @@ function _loadCachedModel() {
 }
 
 /* ============================================================
-   §5. 管理者チェーン
+   §5. 管理者チェーン  ※変更なし
    ============================================================ */
 function saveAdminChain(chain) {
   if (!Array.isArray(chain)) {
@@ -182,7 +179,7 @@ function clearAdminChain() {
 }
 
 /* ============================================================
-   §6. ライブモデル取得
+   §6. ライブモデル取得  ※変更なし
    ============================================================ */
 async function fetchLiveModels(apiKey) {
   const key = apiKey || loadApiKey();
@@ -207,7 +204,7 @@ async function fetchLiveModels(apiKey) {
 }
 
 /* ============================================================
-   §7. 有効チェーン構築
+   §7. 有効チェーン構築  ※変更なし
    ============================================================ */
 function _buildEffectiveChain() {
   const admin = loadAdminChain();
@@ -216,12 +213,10 @@ function _buildEffectiveChain() {
 }
 
 /* ============================================================
-   §8. プロンプト生成  ★ BUG-B3修正
-   Lv3は5×5グリッド（座標0–4）を正しく指示する
+   §8. プロンプト生成  ※変更なし
    ============================================================ */
 function _makePrompt(level) {
   const cfg      = LEVEL_CFG[level] || LEVEL_CFG[0];
-  /* ★ BUG-B3修正: Lv3のみ5×5グリッド、それ以外は4×4 */
   const gridSize = (level === 3) ? 5 : 4;
   const maxCoord = gridSize - 1;
   return `
@@ -240,7 +235,7 @@ Format:
 }
 
 /* ============================================================
-   §9. JSON 抽出
+   §9. JSON 抽出  ※変更なし
    ============================================================ */
 function _extractJson(text) {
   if (!text) return null;
@@ -249,7 +244,7 @@ function _extractJson(text) {
 }
 
 /* ============================================================
-   §10. 交差判定
+   §10. 交差判定  ※変更なし
    ============================================================ */
 function _cross(a, b) {
   const dx1 = a.x2 - a.x1, dy1 = a.y2 - a.y1;
@@ -271,41 +266,97 @@ function _countCross(lines) {
 }
 
 /* ============================================================
-   §11. バリデーション
+   §10b. コリジョン判定  ★ FIX-C1 新設
+   同一直線上にあり、共有点または共有区間を持つ2線分を検出する。
+   幼児が視覚的に識別困難な「重なり線」を除外するための処理。
+
+   判定手順:
+     1. 外積で平行（同一直線候補）かチェック
+     2. b の端点が a の直線上にあるか内積でチェック（共線確認）
+     3. 1D での区間重複チェック（x または y 軸方向の投影）
+   ============================================================ */
+function _isCollinearOverlap(a, b) {
+  const dax = a.x2 - a.x1, day = a.y2 - a.y1;
+  const dbx = b.x2 - b.x1, dby = b.y2 - b.y1;
+
+  // ① 外積 = 0 なら平行（または同一直線候補）
+  const cross = dax * dby - day * dbx;
+  if (cross !== 0) return false;
+
+  // ② b の始点が a の直線上にあるか（外積で確認）
+  const dcx = b.x1 - a.x1, dcy = b.y1 - a.y1;
+  if (dax * dcy - day * dcx !== 0) return false;
+  // ここまでで 2線分は同一直線上にある
+
+  // ③ 1D 区間重複チェック
+  // x 方向が有効なら x で、垂直線なら y で判定
+  if (dax !== 0) {
+    const aMin = Math.min(a.x1, a.x2), aMax = Math.max(a.x1, a.x2);
+    const bMin = Math.min(b.x1, b.x2), bMax = Math.max(b.x1, b.x2);
+    return aMin <= bMax && bMin <= aMax; // 区間が重複または接触
+  } else {
+    const aMin = Math.min(a.y1, a.y2), aMax = Math.max(a.y1, a.y2);
+    const bMin = Math.min(b.y1, b.y2), bMax = Math.max(b.y1, b.y2);
+    return aMin <= bMax && bMin <= aMax;
+  }
+}
+
+/* ============================================================
+   FIX-C2: 問題内にコリジョンペアが1つでもあれば true
+   ============================================================ */
+function _hasCollision(lines) {
+  for (let i = 0; i < lines.length; i++)
+    for (let j = i + 1; j < lines.length; j++)
+      if (_isCollinearOverlap(lines[i], lines[j])) return true;
+  return false;
+}
+
+/* ============================================================
+   §11. バリデーション  ★ FIX-C3 コリジョン除外を追加
    ============================================================ */
 function _validate(prob, level) {
   const cfg = LEVEL_CFG[level] || LEVEL_CFG[0];
   if (!prob || !Array.isArray(prob.lines)) return false;
   if (prob.lines.length !== cfg.lines) return false;
+
+  // FIX-C3: コリジョン（同一直線上の重なり）がある問題は除外
+  if (_hasCollision(prob.lines)) return false;
+
   const cross = _countCross(prob.lines);
   return cross >= cfg.intersections[0] && cross <= cfg.intersections[1];
 }
 
 /* ============================================================
-   §12. 正規化  ★ BUG-B1修正
-   level 引数を追加し、grid / level / hintLines を付与する
+   §12. 正規化  ★ FIX-H1: hintLines を正しく付与
    ============================================================ */
 function _normalize(prob, level) {
   if (!prob || !Array.isArray(prob.lines)) return prob;
 
-  /* lines を数値に正規化 */
+  // lines を数値に正規化
   prob.lines = prob.lines.map(l => ({
     x1: Number(l.x1), y1: Number(l.y1),
     x2: Number(l.x2), y2: Number(l.y2)
   }));
 
-  /* ★ BUG-B1修正: canvas.js が必要とするフィールドを付与
-     Gemini応答には grid / level / hintLines が含まれないため補完する */
-  const gridSize   = (level === 3) ? 5 : 4;
-  prob.grid      = prob.grid      || { cols: gridSize, rows: gridSize };
-  prob.level     = prob.level     ?? level;
-  prob.hintLines = prob.hintLines || [];
+  const gridSize = (level === 3) ? 5 : 4;
+  prob.grid  = prob.grid  || { cols: gridSize, rows: gridSize };
+  prob.level = prob.level ?? level;
+
+  /* ★ FIX-H1: LEVEL_CFG の hints 本数を参照して hintLines を生成する。
+     Gemini 応答には hintLines が含まれないため、
+     旧コードの「prob.hintLines || []」では常に空配列になっていた。
+     修正後: hints 本数だけ lines 先頭からスライスして付与する。
+     problems.js の getProblems() と同じロジックで統一する。 */
+  const hintCount  = LEVEL_CFG[level]?.hints ?? 0;
+  prob.hintLines   = (prob.hintLines && prob.hintLines.length > 0)
+                       ? prob.hintLines               // 既に有効なヒントがあれば保持
+                       : prob.lines.slice(0, hintCount); // なければ先頭 N 本を付与
 
   return prob;
 }
 
 /* ============================================================
-   §13. フォールバック問題バンク
+   §13. フォールバック問題バンク  ※変更なし
    ============================================================ */
 const _FALLBACK_BANK = [
   { lines: [{ x1:0,y1:0,x2:3,y2:3 },{ x1:0,y1:3,x2:3,y2:0 },{ x1:0,y1:1,x2:3,y2:1 }] },
@@ -316,7 +367,7 @@ const _FALLBACK_BANK = [
 ];
 
 /* ============================================================
-   §14. API リクエスト
+   §14. API リクエスト  ※変更なし
    ============================================================ */
 async function _callApi(model, prompt, apiKey) {
   const url  = `${GEN_URL_TPL(model)}?key=${encodeURIComponent(apiKey)}`;
@@ -343,7 +394,7 @@ async function _callApi(model, prompt, apiKey) {
 }
 
 /* ============================================================
-   §15. メイン: generateProblems
+   §15. メイン: generateProblems  ※変更なし
    ============================================================ */
 async function generateProblems(level = 0) {
   const apiKey = loadApiKey();
@@ -394,7 +445,6 @@ async function generateProblems(level = 0) {
         continue;
       }
 
-      /* ★ BUG-B1修正: _normalize に level を渡す */
       const valid = parsed.map(p => _normalize(p, level)).filter(p => _validate(p, level));
 
       if (valid.length === 0) {
@@ -417,7 +467,6 @@ async function generateProblems(level = 0) {
 
   const validCount = collectedValid.length;
 
-  /* ── 全モデル失敗 ── */
   if (validCount === 0) {
     return {
       problems  : (typeof getProblems === 'function')
@@ -428,7 +477,6 @@ async function generateProblems(level = 0) {
     };
   }
 
-  /* ── 問題数不足：ローカル問題で補完 ── */
   const ratio = validCount / TARGET_COUNT;
   if (ratio < LEVEL_ALERT_RATIO) {
     const alertType = 'LEVEL';
@@ -458,7 +506,7 @@ async function generateProblems(level = 0) {
 }
 
 /* ============================================================
-   §16. エクスポート
+   §16. エクスポート  ※変更なし
    ============================================================ */
 window.GeminiAPI = {
   generateProblems,
