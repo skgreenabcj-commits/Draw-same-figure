@@ -349,7 +349,16 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('btn-admin-model')
     ?.addEventListener('click', () => window.open('admin.html', '_blank'));
   document.getElementById('model-error-banner')
-    ?.addEventListener('click', () => window.open('admin.html', '_blank'));
+  ?.addEventListener('click', (e) => {
+    if (!e.target.closest('#model-error-banner-close')) {
+      window.open('admin.html', '_blank');
+    }
+  });
+document.getElementById('model-error-banner-close')
+  ?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    hideErrorBanner();
+  });
 
   /* ゲーム操作 */
   document.getElementById('btn-home')
