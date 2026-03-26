@@ -434,4 +434,12 @@ document.addEventListener('DOMContentLoaded', () => {
       600
     );
   }
+
+    /* Geminiの設定不十分の際のアラート */
+   if (!loadApiKey()) {
+     showErrorBanner('Gemini APIキーが未設定です。管理者設定からキーを入力してください。', 'info');
+   } else if (!GeminiAPI.loadAdminChain()) {
+     showErrorBanner('AIモデルの優先順位が未設定です。管理者設定から設定してください。', 'info');
+}
+  
 });
