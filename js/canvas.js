@@ -1,27 +1,22 @@
 /**
- * canvas.js  v2.1R2
- * 修正内容:
- *   - 根本原因1: resizeCanvas() をキャンバスの CSS 実サイズではなく
- *     .canvas-wrap の確定サイズから取得するよう修正。
- *     getBoundingClientRect が 0 を返す場合は offsetWidth、
- *     それも 0 の場合は parentElement を遡って取得する。
- *   - 根本原因2: drawModel/drawAnswer 内で毎回 resizeCanvas() を呼ぶのをやめ、
- *     _getCanvasSize() で CSS 論理サイズを取得して描画計算に使用する。
- *     canvas の内部解像度リセット（canvas.width = ...）は initCanvases 時と
- *     ResizeObserver 時のみ行う。
- *   - 根本原因3: loadQuestion から呼ばれる描画を setTimeout(0) + rAF で
- *     確実にレイアウト確定後に実行する。
+ * canvas.js  v2.2
+ * 変更点 (v2.1R2 → v2.2):
+ *   BUG-C: drawWrongFeedback で ctx.scale() 前に
+ *          ctx.setTransform(1,0,0,1,0,0) を追加。
+ *          canvas.width 再代入でコンテキストはリセットされるが、
+ *          防御的に変換行列を明示リセットすることで
+ *          スケール累積による描画崩れを完全に防ぐ。
  */
 
 /* ============================================================
    内部状態
    ============================================================ */
 const CanvasState = {
-  userLines:  [],
-  dragging:   false,
-  startPt:    null,
-  currentPt:  null,
-  problem:    null
+  userLines : [],
+  dragging  : false,
+  startPt   : null,
+  currentPt : null,
+  problem   : null
 };
 
 /* ============================================================
@@ -131,23 +126,15 @@ function syncHeaders(problem) {
 }
 
 /* ============================================================
-   根本原因1・2 修正: キャンバスサイズ取得 & リサイズ
+   キャンバスサイズ取得 & リサイズ
    ============================================================ */
-
-/**
- * .canvas-wrap の実 CSS 幅を確実に取得する。
- * getBoundingClientRect → offsetWidth → 親要素を遡る の順で試みる。
- * すべて 0 の場合は fallback 値 280 を返す。
- */
 function _getWrapSize(canvasId) {
   const canvas = document.getElementById(canvasId);
   if (!canvas) return 280;
 
-  // canvas 自身の CSS 幅を試みる（width:100% が効いていれば取れる）
   let size = canvas.getBoundingClientRect().width;
   if (size > 10) return size;
 
-  // 親 (.canvas-wrap) から取得
   const wrap = canvas.parentElement;
   if (wrap) {
     size = wrap.getBoundingClientRect().width;
@@ -156,7 +143,6 @@ function _getWrapSize(canvasId) {
     if (size > 10) return size;
   }
 
-  // さらに親 (.grid-body) から取得して row-header 分を引く
   const gridBody = wrap && wrap.parentElement;
   if (gridBody) {
     const headerSize = parseFloat(
@@ -166,14 +152,9 @@ function _getWrapSize(canvasId) {
     if (size > 10) return size;
   }
 
-  return 280; // 最終フォールバック
+  return 280;
 }
 
-/**
- * canvas の内部解像度を CSS サイズに合わせて DPR 対応でセットする。
- * ctx の変換行列もリセットしてスケールを再適用する。
- * 戻り値: CSS 論理ピクセル単位のサイズ（描画計算に使用）
- */
 function _resizeCanvasToWrap(canvasId) {
   const canvas = document.getElementById(canvasId);
   if (!canvas) return 280;
@@ -182,7 +163,6 @@ function _resizeCanvasToWrap(canvasId) {
   const dpr  = window.devicePixelRatio || 1;
   const phys = Math.round(size * dpr);
 
-  // サイズが変わった場合のみ内部解像度を更新（変換行列もリセット）
   if (canvas.width !== phys || canvas.height !== phys) {
     canvas.width  = phys;
     canvas.height = phys;
@@ -195,10 +175,6 @@ function _resizeCanvasToWrap(canvasId) {
   return size;
 }
 
-/**
- * 旧版互換: resizeCanvas(canvas) シグネチャを維持しつつ
- * canvas の id から _resizeCanvasToWrap を呼ぶ。
- */
 function resizeCanvas(canvas) {
   return _resizeCanvasToWrap(canvas.id);
 }
@@ -298,7 +274,7 @@ function drawPreviewLine(ctx, g, fromDot, toPx) {
    公開: 見本キャンバス描画
    ============================================================ */
 function drawModel(problem) {
-  const size = _resizeCanvasToWrap('canvas-model');
+  const size   = _resizeCanvasToWrap('canvas-model');
   const canvas = document.getElementById('canvas-model');
   if (!canvas) return;
   const ctx = canvas.getContext('2d');
@@ -317,7 +293,7 @@ function drawModel(problem) {
    公開: 回答キャンバス描画
    ============================================================ */
 function drawAnswer(problem) {
-  const size = _resizeCanvasToWrap('canvas-answer');
+  const size   = _resizeCanvasToWrap('canvas-answer');
   const canvas = document.getElementById('canvas-answer');
   if (!canvas) return;
   const ctx = canvas.getContext('2d');
@@ -344,7 +320,7 @@ function drawAnswer(problem) {
    オーバーレイ描画
    ============================================================ */
 function drawOverlay(problem, toPx) {
-  const size = _resizeCanvasToWrap('canvas-overlay');
+  const size   = _resizeCanvasToWrap('canvas-overlay');
   const canvas = document.getElementById('canvas-overlay');
   if (!canvas) return;
   const ctx = canvas.getContext('2d');
@@ -449,7 +425,7 @@ function setupInteraction(problem, onLineAdded) {
 /* ============================================================
    公開: 回答線の取得・操作
    ============================================================ */
-function getAnswerLines()   { return [...CanvasState.userLines]; }
+function getAnswerLines()  { return [...CanvasState.userLines]; }
 
 function undoLastLine() {
   if (CanvasState.userLines.length === 0) return;
@@ -463,11 +439,12 @@ function clearAnswerLines() {
 }
 
 /* ============================================================
-   公開: 不正解フィードバック描画
+   公開: 不正解フィードバック描画  ★ BUG-C 修正
    ============================================================ */
 function drawWrongFeedback(problem, userLines) {
-  const canvas = document.getElementById('canvas-wrong');
-  const dpr    = window.devicePixelRatio || 1;
+  const canvas  = document.getElementById('canvas-wrong');
+  if (!canvas) return;
+  const dpr     = window.devicePixelRatio || 1;
   const parentW = canvas.parentElement
     ? (canvas.parentElement.getBoundingClientRect().width
        || canvas.parentElement.offsetWidth || 280)
@@ -480,6 +457,9 @@ function drawWrongFeedback(problem, userLines) {
   canvas.style.height = W + 'px';
 
   const ctx = canvas.getContext('2d');
+  /* ★ BUG-C修正: canvas.width 再代入でリセットされるが、
+     防御的に変換行列を明示リセットしてからスケールを適用する */
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.scale(dpr, dpr);
 
   const g = calcGrid(W, problem.grid);
@@ -537,7 +517,6 @@ function initCanvases(problem) {
   CanvasState.startPt   = null;
   CanvasState.currentPt = null;
   CanvasState.problem   = problem;
-  // 内部解像度を一旦リセット（次の描画時に正しいサイズで再セットされる）
   ['canvas-model', 'canvas-answer', 'canvas-overlay'].forEach(id => {
     const c = document.getElementById(id);
     if (c) { c.width = 1; c.height = 1; }
