@@ -1,9 +1,12 @@
 /* ============================================================
-   app.js  v3.1  ―  BUG-1/2/3 修正版
+   app.js  v3.2  ―  BUG-A/E 修正版
+   BUG-A: Lv2/Lv3で canvas-overlay を hidden にしないよう修正
+          → 線本数制限はLv0/Lv1のみ。Lv2/Lv3は常にoverlay表示。
+   BUG-E: 初回バナー条件を loadApiKey() 直接参照に修正
    ============================================================ */
 
 /* ---------- 定数 ---------- */
-const GEMINI_TIMEOUT_MS  = 20000;
+const GEMINI_TIMEOUT_MS = 20000;
 
 /* ---------- アプリ状態 ---------- */
 const AppState = {
@@ -16,8 +19,8 @@ const AppState = {
 
 /* ---------- 称賛メッセージ ---------- */
 const PRAISE_LIST = [
-  'すごい！ぴったり！','かんぺき！！ 🎉','やったね！ばっちり！','さすが！！ てんさい！',
-  'せいかい！よくできました！','かっこいい！','おみごと！！ 🌟','すばらしい！！'
+  'すごい！ぴったり！', 'かんぺき！！ 🎉', 'やったね！ばっちり！', 'さすが！！ てんさい！',
+  'せいかい！よくできました！', 'かっこいい！', 'おみごと！！ 🌟', 'すばらしい！！'
 ];
 function randomPraise() {
   return PRAISE_LIST[Math.floor(Math.random() * PRAISE_LIST.length)];
@@ -44,8 +47,8 @@ function showLoading(show) {
    エラーバナー
    ============================================================ */
 function showErrorBanner(message, type = 'error') {
-  const banner  = document.getElementById('model-error-banner');
-  const textEl  = document.getElementById('model-error-banner-text');
+  const banner = document.getElementById('model-error-banner');
+  const textEl = document.getElementById('model-error-banner-text');
   if (!banner) return;
   if (textEl) {
     textEl.textContent = type === 'error'
@@ -92,20 +95,27 @@ function updateHintMsg(problem) {
 }
 
 /* ============================================================
-   線数上限管理
+   線数上限管理  ★ BUG-A 修正
+   Lv0/Lv1: 描ける線の本数に上限あり → 上限到達でoverlay表示し追加不可
+   Lv2/Lv3: 本数制限なし → overlayは常にremove('hidden')のまま
    ============================================================ */
 function _refreshOverlayLimit(problem, lineCount) {
   const ov = document.getElementById('canvas-overlay');
   if (!ov) return;
+
+  /* ★ BUG-A修正: Lv2/Lv3 は overlay を hidden にしない
+     （旧コードは ov.classList.add('hidden') していたため線が引けなかった） */
   if (problem.level !== 0 && problem.level !== 1) {
-    ov.classList.add('hidden');
+    ov.classList.remove('hidden');
     return;
   }
+
+  /* Lv0/Lv1: 残り本数管理 */
   const maxLines = problem.lines.length - (problem.hintLines || []).length;
   if (lineCount >= maxLines) {
-    ov.classList.remove('hidden');
+    ov.classList.add('hidden');   // 上限到達 → 追加不可
   } else {
-    ov.classList.add('hidden');
+    ov.classList.remove('hidden'); // 上限未満 → 引ける
   }
 }
 
@@ -118,8 +128,8 @@ function judgeAnswer(problem, userLines) {
   const allUser = [...hint, ...userLines];
   if (allUser.length !== correct.length) return false;
   const norm = l => [
-    `${Math.min(l.x1,l.x2)},${Math.min(l.y1,l.y2)}`,
-    `${Math.max(l.x1,l.x2)},${Math.max(l.y1,l.y2)}`
+    `${Math.min(l.x1, l.x2)},${Math.min(l.y1, l.y2)}`,
+    `${Math.max(l.x1, l.x2)},${Math.max(l.y1, l.y2)}`
   ].join('-');
   const correctSet = new Set(correct.map(norm));
   for (const line of allUser) {
@@ -216,7 +226,7 @@ function showResult() {
 }
 
 /* ============================================================
-   ゲーム開始  ★ BUG-1/2/3 修正箇所
+   ゲーム開始
    ============================================================ */
 async function startGame() {
   const level = AppState.level;
@@ -235,7 +245,6 @@ async function startGame() {
           setTimeout(() => rej(new Error('timeout')), GEMINI_TIMEOUT_MS)
         ),
       ]);
-      /* ★ BUG-2修正: generateProblems はオブジェクトを返す */
       if (result && Array.isArray(result.problems) && result.problems.length > 0) {
         problems = result.problems;
         if (result.alertType) {
@@ -248,7 +257,7 @@ async function startGame() {
           );
         }
       } else if (Array.isArray(result) && result.length > 0) {
-        problems = result; // 万が一配列で返った場合の保険
+        problems = result;
       }
     } catch (e) {
       console.warn('Gemini 失敗:', e.message);
@@ -256,8 +265,7 @@ async function startGame() {
     }
   }
 
-  /* ── ★ BUG-1/3修正: ローカル問題フォールバック ──
-   * LOCAL_PROBLEMS は存在しないため getProblems() を使用する */
+  /* ── ローカル問題フォールバック ── */
   if (!problems || !problems.length) {
     if (typeof getProblems === 'function') {
       problems = getProblems(level);
@@ -348,17 +356,19 @@ document.addEventListener('DOMContentLoaded', () => {
   /* 管理者設定 */
   document.getElementById('btn-admin-model')
     ?.addEventListener('click', () => window.open('admin.html', '_blank'));
+
   document.getElementById('model-error-banner')
-  ?.addEventListener('click', (e) => {
-    if (!e.target.closest('#model-error-banner-close')) {
-      window.open('admin.html', '_blank');
-    }
-  });
-document.getElementById('model-error-banner-close')
-  ?.addEventListener('click', (e) => {
-    e.stopPropagation();
-    hideErrorBanner();
-  });
+    ?.addEventListener('click', (e) => {
+      if (!e.target.closest('#model-error-banner-close')) {
+        window.open('admin.html', '_blank');
+      }
+    });
+
+  document.getElementById('model-error-banner-close')
+    ?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      hideErrorBanner();
+    });
 
   /* ゲーム操作 */
   document.getElementById('btn-home')
@@ -416,8 +426,9 @@ document.getElementById('model-error-banner-close')
     if (sb) sb.disabled = false;
   }
 
-  /* 初回案内バナー */
-  if (AppState.apiKey && typeof loadAdminChain === 'function' && !loadAdminChain()) {
+  /* ★ BUG-E修正: loadApiKey() を直接参照して判定 */
+  const currentKey = (typeof loadApiKey === 'function') ? loadApiKey() : '';
+  if (currentKey && typeof loadAdminChain === 'function' && !loadAdminChain()) {
     setTimeout(() =>
       showErrorBanner('AIモデルが未設定です。管理者設定から推奨モデルを選んでください。', 'info'),
       600
