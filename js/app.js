@@ -120,17 +120,27 @@ function _refreshOverlayLimit(problem, lineCount) {
 }
 
 /* ============================================================
-   判定
+   判定  ★ norm 関数を辞書順比較に修正
+   旧: Math.min(x1,x2),Math.min(y1,y2) を独立に使用
+       → 異なる斜め線が同一キーになる誤判定が発生
+   新: 始点・終点を文字列として辞書順で統一
+       → 方向違いの同一線は同じキー、異なる線は必ず異なるキー
    ============================================================ */
 function judgeAnswer(problem, userLines) {
   const correct = problem.lines;
   const hint    = problem.hintLines || [];
   const allUser = [...hint, ...userLines];
   if (allUser.length !== correct.length) return false;
-  const norm = l => [
-    `${Math.min(l.x1, l.x2)},${Math.min(l.y1, l.y2)}`,
-    `${Math.max(l.x1, l.x2)},${Math.max(l.y1, l.y2)}`
-  ].join('-');
+
+  /* ★ 修正: 始点・終点を辞書順で統一して正規化する
+     例: {x1:3,y1:0,x2:0,y2:3} → "0,3-3,0"（逆方向でも同一キー）
+         {x1:0,y1:1,x2:3,y2:2} → "0,1-3,2"（別線とは異なるキー）  */
+  const norm = l => {
+    const p1 = `${l.x1},${l.y1}`;
+    const p2 = `${l.x2},${l.y2}`;
+    return p1 <= p2 ? `${p1}-${p2}` : `${p2}-${p1}`;
+  };
+
   const correctSet = new Set(correct.map(norm));
   for (const line of allUser) {
     if (!correctSet.has(norm(line))) return false;
