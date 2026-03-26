@@ -1,9 +1,14 @@
 /**
- * gemini.js  v5.9.3
- * 変更点 (v5.9.2 → v5.9.3):
- *   - loadAdminChain: 戻り値が配列でない場合は null を返す型ガードを追加
- *     （古い形式の localStorage データで chain.map is not a function を防止）
- *   - _buildEffectiveChain: 防御的チェックを追加
+ * gemini.js  v5.10.0
+ * 変更点 (v5.9.3 → v5.10.0):
+ *   BUG-B1: _normalize(prob, level) に level 引数を追加。
+ *           grid / level / hintLines を付与するよう修正。
+ *           → Gemini生成問題で problem.grid.cols undefined クラッシュを解消。
+ *   BUG-B2: LEVEL_CFG の Lv2/Lv3 lines数を problems.js と一致させた。
+ *           Lv2: lines:5→4, intersections:[2,8]→[2,5]
+ *           Lv3: lines:6→5, intersections:[3,12]→[0,8]
+ *   BUG-B3: _makePrompt がLv3でも4×4を指示していた問題を修正。
+ *           gridSize / maxCoord をレベルに応じて動的に決定。
  */
 
 /* ============================================================
@@ -13,11 +18,11 @@ const API_BASE_URL   = 'https://generativelanguage.googleapis.com';
 const MODEL_LIST_URL = `${API_BASE_URL}/v1beta/models`;
 const GEN_URL_TPL    = (m) => `${API_BASE_URL}/v1beta/models/${m}:generateContent`;
 
-const MODEL_CACHE_KEY   = 'gemini_model_v3';
-const ADMIN_CHAIN_KEY   = 'gemini_admin_chain_v1';
-const ADMIN_STATUS_KEY  = 'gemini_admin_status_v1';
-const ALERT_LOG_KEY     = 'gemini_alert_log_v1';
-const API_KEY_STORAGE   = 'gemini_api_key';
+const MODEL_CACHE_KEY  = 'gemini_model_v3';
+const ADMIN_CHAIN_KEY  = 'gemini_admin_chain_v1';
+const ADMIN_STATUS_KEY = 'gemini_admin_status_v1';
+const ALERT_LOG_KEY    = 'gemini_alert_log_v1';
+const API_KEY_STORAGE  = 'gemini_api_key';
 
 const MODEL_CACHE_TTL   = 60 * 60 * 1000;
 const ALERT_LOG_MAX     = 100;
@@ -33,11 +38,16 @@ const FALLBACK_CHAIN = [
   'gemini-1.0-pro'
 ];
 
+/* ★ BUG-B2修正: problems.js の仕様に合わせて lines数・intersections を修正
+   Lv0: 3本, 4×4, 交差0-3
+   Lv1: 4本, 4×4, 交差0-5
+   Lv2: 4本, 4×4, 交差2-5  (旧: lines:5, intersections:[2,8])
+   Lv3: 5本, 5×5, 交差0-8  (旧: lines:6, intersections:[3,12]) */
 const LEVEL_CFG = [
-  { lines: 3, hints: 1, intersections: [0, 3] },
-  { lines: 4, hints: 1, intersections: [0, 5] },
-  { lines: 5, hints: 2, intersections: [2, 8] },
-  { lines: 6, hints: 2, intersections: [3, 12] }
+  { lines: 3, hints: 2, intersections: [0, 3]  },  // Lv0
+  { lines: 4, hints: 2, intersections: [0, 5]  },  // Lv1
+  { lines: 4, hints: 0, intersections: [2, 5]  },  // Lv2 ★修正
+  { lines: 5, hints: 0, intersections: [0, 8]  }   // Lv3 ★修正
 ];
 
 /* ============================================================
@@ -100,9 +110,7 @@ function _saveModel(model) {
     alertType        : null
   });
   try {
-    localStorage.setItem(MODEL_CACHE_KEY, JSON.stringify({
-      model, ts: Date.now()
-    }));
+    localStorage.setItem(MODEL_CACHE_KEY, JSON.stringify({ model, ts: Date.now() }));
   } catch (_) {}
 }
 
@@ -140,7 +148,6 @@ function _loadCachedModel() {
    §5. 管理者チェーン
    ============================================================ */
 function saveAdminChain(chain) {
-  // 保存前に必ず配列であることを保証
   if (!Array.isArray(chain)) {
     console.warn('[gemini] saveAdminChain: chain is not an array, aborting save');
     return;
@@ -148,23 +155,16 @@ function saveAdminChain(chain) {
   try { localStorage.setItem(ADMIN_CHAIN_KEY, JSON.stringify(chain)); } catch (_) {}
 }
 
-/**
- * v5.9.3 修正:
- * JSON.parse の結果が配列でない場合（文字列・オブジェクト・null等）は
- * null を返して呼び出し側が FALLBACK_CHAIN を使うようにする
- */
 function loadAdminChain() {
   try {
     const raw = localStorage.getItem(ADMIN_CHAIN_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
-    // 型ガード: 配列かつ要素が1件以上の場合のみ有効とみなす
     if (!Array.isArray(parsed) || parsed.length === 0) {
       console.warn('[gemini] loadAdminChain: stored value is not a valid array, clearing');
-      localStorage.removeItem(ADMIN_CHAIN_KEY); // 不正データを削除
+      localStorage.removeItem(ADMIN_CHAIN_KEY);
       return null;
     }
-    // 各要素が文字列であることを確認
     const validChain = parsed.filter(item => typeof item === 'string' && item.trim() !== '');
     if (validChain.length === 0) {
       localStorage.removeItem(ADMIN_CHAIN_KEY);
@@ -172,7 +172,7 @@ function loadAdminChain() {
     }
     return validChain;
   } catch (_) {
-    localStorage.removeItem(ADMIN_CHAIN_KEY); // パース失敗時も削除
+    localStorage.removeItem(ADMIN_CHAIN_KEY);
     return null;
   }
 }
@@ -197,14 +197,12 @@ async function fetchLiveModels(apiKey) {
   const filtered = all.filter(name =>
     !EXCLUDED_KEYWORDS.some(kw => name.toLowerCase().includes(kw))
   );
-
   const preferred = filtered.filter(name =>
     PREFERRED_KEYWORDS.some(kw => name.toLowerCase().includes(kw))
   );
   const rest = filtered.filter(name =>
     !PREFERRED_KEYWORDS.some(kw => name.toLowerCase().includes(kw))
   );
-
   return [...preferred, ...rest];
 }
 
@@ -213,28 +211,31 @@ async function fetchLiveModels(apiKey) {
    ============================================================ */
 function _buildEffectiveChain() {
   const admin = loadAdminChain();
-  // v5.9.3: loadAdminChain が null/非配列を返さないよう型ガード済みだが念のため確認
   if (Array.isArray(admin) && admin.length > 0) return admin;
   return FALLBACK_CHAIN;
 }
 
 /* ============================================================
-   §8. プロンプト生成
+   §8. プロンプト生成  ★ BUG-B3修正
+   Lv3は5×5グリッド（座標0–4）を正しく指示する
    ============================================================ */
 function _makePrompt(level) {
-  const cfg = LEVEL_CFG[level] || LEVEL_CFG[0];
+  const cfg      = LEVEL_CFG[level] || LEVEL_CFG[0];
+  /* ★ BUG-B3修正: Lv3のみ5×5グリッド、それ以外は4×4 */
+  const gridSize = (level === 3) ? 5 : 4;
+  const maxCoord = gridSize - 1;
   return `
 You are a puzzle generator. Generate exactly ${TARGET_COUNT} unique line-crossing puzzles.
 Rules:
-- Grid: 4×4 dots (coordinates 0–3 on both axes)
+- Grid: ${gridSize}×${gridSize} dots (coordinates 0–${maxCoord} on both axes)
 - Each puzzle has exactly ${cfg.lines} line segments
-- Each line segment: {x1,y1,x2,y2} where all values are integers 0–3
+- Each line segment: {x1,y1,x2,y2} where all values are integers 0–${maxCoord}
 - No duplicate lines within a puzzle
 - Each puzzle must have between ${cfg.intersections[0]} and ${cfg.intersections[1]} proper intersections (interior crossing only, shared endpoints do NOT count)
 - Output ONLY a valid JSON array, no markdown, no explanation
 
 Format:
-[{"lines":[{"x1":0,"y1":0,"x2":3,"y2":3},...]},...]
+[{"lines":[{"x1":0,"y1":0,"x2":${maxCoord},"y2":${maxCoord}},...]},...]
 `.trim();
 }
 
@@ -281,14 +282,25 @@ function _validate(prob, level) {
 }
 
 /* ============================================================
-   §12. 正規化
+   §12. 正規化  ★ BUG-B1修正
+   level 引数を追加し、grid / level / hintLines を付与する
    ============================================================ */
-function _normalize(prob) {
+function _normalize(prob, level) {
   if (!prob || !Array.isArray(prob.lines)) return prob;
+
+  /* lines を数値に正規化 */
   prob.lines = prob.lines.map(l => ({
     x1: Number(l.x1), y1: Number(l.y1),
     x2: Number(l.x2), y2: Number(l.y2)
   }));
+
+  /* ★ BUG-B1修正: canvas.js が必要とするフィールドを付与
+     Gemini応答には grid / level / hintLines が含まれないため補完する */
+  const gridSize   = (level === 3) ? 5 : 4;
+  prob.grid      = prob.grid      || { cols: gridSize, rows: gridSize };
+  prob.level     = prob.level     ?? level;
+  prob.hintLines = prob.hintLines || [];
+
   return prob;
 }
 
@@ -309,14 +321,14 @@ const _FALLBACK_BANK = [
 async function _callApi(model, prompt, apiKey) {
   const url  = `${GEN_URL_TPL(model)}?key=${encodeURIComponent(apiKey)}`;
   const body = {
-    contents: [{ parts: [{ text: prompt }] }],
+    contents        : [{ parts: [{ text: prompt }] }],
     generationConfig: { temperature: 0.7, maxOutputTokens: 2048 }
   };
 
   const res = await fetch(url, {
-    method  : 'POST',
-    headers : { 'Content-Type': 'application/json' },
-    body    : JSON.stringify(body)
+    method : 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body   : JSON.stringify(body)
   });
 
   if (res.status === 429) throw Object.assign(new Error('Rate limit'), { code: 429 });
@@ -337,11 +349,11 @@ async function generateProblems(level = 0) {
   const apiKey = loadApiKey();
   if (!apiKey) {
     return {
-      problems   : (typeof getProblems === 'function')
-                     ? getProblems(level)
-                     : _FALLBACK_BANK.slice(0, TARGET_COUNT),
-      validCount : 0,
-      alertType  : null
+      problems  : (typeof getProblems === 'function')
+                    ? getProblems(level)
+                    : _FALLBACK_BANK.slice(0, TARGET_COUNT),
+      validCount: 0,
+      alertType : null
     };
   }
 
@@ -362,12 +374,7 @@ async function generateProblems(level = 0) {
 
       if (!parseOk) {
         lastAlertType = 'MODEL';
-        _updateStatus({
-          errorCount  : (_status.errorCount ?? 0) + 1,
-          lastError   : 'JSON parse failed',
-          lastErrorTs : new Date().toISOString(),
-          alertType   : 'MODEL'
-        });
+        _updateStatus({ errorCount: (_status.errorCount ?? 0) + 1, lastError: 'JSON parse failed', lastErrorTs: new Date().toISOString(), alertType: 'MODEL' });
         _appendAlertLog({ alertType: 'MODEL', message: 'JSON parse failed', model, rawJson: rawText });
         continue;
       }
@@ -375,44 +382,25 @@ async function generateProblems(level = 0) {
       let parsed;
       try { parsed = JSON.parse(jsonStr); } catch (_) {
         lastAlertType = 'MODEL';
-        _updateStatus({
-          errorCount  : (_status.errorCount ?? 0) + 1,
-          lastError   : 'JSON.parse threw',
-          lastErrorTs : new Date().toISOString(),
-          alertType   : 'MODEL'
-        });
+        _updateStatus({ errorCount: (_status.errorCount ?? 0) + 1, lastError: 'JSON.parse threw', lastErrorTs: new Date().toISOString(), alertType: 'MODEL' });
         _appendAlertLog({ alertType: 'MODEL', message: 'JSON.parse threw', model, rawJson: jsonStr });
         continue;
       }
 
       if (!Array.isArray(parsed) || parsed.length === 0) {
         lastAlertType = 'PROMPT';
-        _updateStatus({
-          errorCount  : (_status.errorCount ?? 0) + 1,
-          lastError   : 'Empty array',
-          lastErrorTs : new Date().toISOString(),
-          alertType   : 'PROMPT'
-        });
+        _updateStatus({ errorCount: (_status.errorCount ?? 0) + 1, lastError: 'Empty array', lastErrorTs: new Date().toISOString(), alertType: 'PROMPT' });
         _appendAlertLog({ alertType: 'PROMPT', message: 'Empty array from model', model, rawJson: jsonStr });
         continue;
       }
 
-      const valid = parsed.map(_normalize).filter(p => _validate(p, level));
+      /* ★ BUG-B1修正: _normalize に level を渡す */
+      const valid = parsed.map(p => _normalize(p, level)).filter(p => _validate(p, level));
 
       if (valid.length === 0) {
         lastAlertType = 'PROMPT';
-        _updateStatus({
-          errorCount  : (_status.errorCount ?? 0) + 1,
-          lastError   : 'No valid problems',
-          lastErrorTs : new Date().toISOString(),
-          alertType   : 'PROMPT'
-        });
-        _appendAlertLog({
-          alertType : 'PROMPT',
-          message   : 'No valid problems in output',
-          model,
-          rawJson   : jsonStr
-        });
+        _updateStatus({ errorCount: (_status.errorCount ?? 0) + 1, lastError: 'No valid problems', lastErrorTs: new Date().toISOString(), alertType: 'PROMPT' });
+        _appendAlertLog({ alertType: 'PROMPT', message: 'No valid problems in output', model, rawJson: jsonStr });
         continue;
       }
 
@@ -422,12 +410,7 @@ async function generateProblems(level = 0) {
 
     } catch (err) {
       lastAlertType = 'MODEL';
-      _updateStatus({
-        errorCount  : (_status.errorCount ?? 0) + 1,
-        lastError   : err.message,
-        lastErrorTs : new Date().toISOString(),
-        alertType   : 'MODEL'
-      });
+      _updateStatus({ errorCount: (_status.errorCount ?? 0) + 1, lastError: err.message, lastErrorTs: new Date().toISOString(), alertType: 'MODEL' });
       _appendAlertLog({ alertType: 'MODEL', message: err.message, model, rawJson: lastRawJson });
     }
   }
@@ -437,11 +420,11 @@ async function generateProblems(level = 0) {
   /* ── 全モデル失敗 ── */
   if (validCount === 0) {
     return {
-      problems   : (typeof getProblems === 'function')
-                     ? getProblems(level)
-                     : _FALLBACK_BANK.slice(0, TARGET_COUNT),
-      validCount : 0,
-      alertType  : lastAlertType
+      problems  : (typeof getProblems === 'function')
+                    ? getProblems(level)
+                    : _FALLBACK_BANK.slice(0, TARGET_COUNT),
+      validCount: 0,
+      alertType : lastAlertType
     };
   }
 
@@ -471,11 +454,7 @@ async function generateProblems(level = 0) {
   }
 
   _updateStatus({ alertType: null });
-  return {
-    problems   : collectedValid.slice(0, TARGET_COUNT),
-    validCount,
-    alertType  : null
-  };
+  return { problems: collectedValid.slice(0, TARGET_COUNT), validCount, alertType: null };
 }
 
 /* ============================================================
