@@ -408,6 +408,28 @@ button:active { transform: scale(.95); }
 .model-error-banner--info  { background: #1565c0; color: #fff; }
 .model-error-banner--info:hover { background: #0d47a1; }
 
+.banner-close-btn {
+  background : none;
+  border     : none;
+  color      : inherit;
+  font-size  : 1.1rem;
+  cursor     : pointer;
+  margin-left: 0.75rem;
+  padding    : 0 0.25rem;
+  line-height: 1;
+  opacity    : 0.8;
+  flex-shrink: 0;
+}
+.banner-close-btn:hover {
+  opacity: 1;
+}
+.model-error-banner {
+  display    : flex;           /* ← textとボタンを横並びに */
+  align-items: center;
+  justify-content: space-between;
+}
+
+
 /* ===== Responsive — タブレット ===== */
 @media (min-width: 601px) and (max-width: 900px) {
   :root { --header-size: 44px; }
