@@ -1,9 +1,11 @@
 // ============================================================
-// app.js  v3.3  (BUG-F1 修正版)
+// app.js  v3.4
 //   BUG-A  : Lv2/Lv3 のキャンバスオーバーレイを常時表示
 //   BUG-E  : 初期バナー判定を loadApiKey() で直接チェック
-//   BUG-F1 : DOMContentLoaded 内の setTimeout バナーブロック
-//            (block①) を削除し、即時ブロック(block②) に統一
+//   BUG-F1 : DOMContentLoaded の setTimeout バナーブロック削除
+//   ESC-01 : GeminiAPI 参照を typeof ガードで保護
+//   ESC-02 : btn-start / btn-retry の多重起動を _gameStarting
+//            フラグで防止、startGame を await で正しく待機
 // ============================================================
 
 'use strict';
@@ -11,8 +13,8 @@
 // ─────────────────────────────────────────
 // 定数
 // ─────────────────────────────────────────
-const STORAGE_KEY_API  = 'gemini_api_key';
-const MAX_QUESTIONS    = 5;
+const STORAGE_KEY_API = 'gemini_api_key';
+const MAX_QUESTIONS   = 5;
 const PRAISE_LIST = [
   'すごい！', 'やったね！', 'かんぺき！', 'すばらしい！',
   'よくできました！', 'さすが！', 'すてき！', 'ナイス！',
@@ -28,6 +30,9 @@ const AppState = {
   score    : 0,
   apiKey   : '',
 };
+
+// 多重起動防止フラグ (ESC-02)
+let _gameStarting = false;
 
 // ─────────────────────────────────────────
 // ユーティリティ
@@ -70,7 +75,7 @@ function showErrorBanner(message, type = 'error') {
   const banner = document.getElementById('model-error-banner');
   const text   = document.getElementById('model-error-banner-text');
   if (!banner || !text) return;
-  text.textContent = message;
+  text.textContent    = message;
   banner.dataset.type = type;
   banner.classList.remove('hidden');
 }
@@ -123,10 +128,10 @@ function _refreshOverlayLimit(problem) {
     return;
   }
 
-  // Lv0/Lv1 は解答線が上限に達したら描画を止める
-  const userLines  = getAnswerLines ? getAnswerLines() : [];
+  // Lv0/Lv1 はユーザー解答線が上限に達したら描画を止める
+  const userLines  = typeof getAnswerLines === 'function' ? getAnswerLines() : [];
   const hintCount  = Array.isArray(problem.hintLines) ? problem.hintLines.length : 0;
-  const totalLines = problem.lines ? problem.lines.length : 0;
+  const totalLines = Array.isArray(problem.lines) ? problem.lines.length : 0;
   const limit      = totalLines - hintCount;
 
   if (userLines.length >= limit) {
@@ -140,15 +145,16 @@ function _refreshOverlayLimit(problem) {
 // 正解判定
 // ─────────────────────────────────────────
 function judgeAnswer(problem, userLines) {
+  // 線を方向非依存の文字列キーに正規化
   const norm = l => {
     const p1 = `${l.x1},${l.y1}`;
     const p2 = `${l.x2},${l.y2}`;
     return p1 <= p2 ? `${p1}-${p2}` : `${p2}-${p1}`;
   };
 
-  const hintLines  = Array.isArray(problem.hintLines) ? problem.hintLines : [];
-  const allLines   = [...hintLines, ...userLines];
-  const answerSet  = new Set(problem.lines.map(norm));
+  const hintLines    = Array.isArray(problem.hintLines) ? problem.hintLines : [];
+  const allLines     = [...hintLines, ...userLines];
+  const answerSet    = new Set((problem.lines || []).map(norm));
   const submittedSet = new Set(allLines.map(norm));
 
   if (submittedSet.size !== answerSet.size) return false;
@@ -181,20 +187,21 @@ function loadQuestion(index) {
 // 回答チェック
 // ─────────────────────────────────────────
 function checkAnswer() {
-  const problem   = AppState.problems[AppState.index];
+  const problem = AppState.problems[AppState.index];
   if (!problem) return;
+
   const userLines = typeof getAnswerLines === 'function' ? getAnswerLines() : [];
   const correct   = judgeAnswer(problem, userLines);
 
   const overlay = document.getElementById('feedback-overlay');
   if (overlay) overlay.classList.remove('hidden');
 
+  const wrongSection   = document.getElementById('feedback-wrong');
+  const correctSection = document.getElementById('feedback-correct');
+
   if (correct) {
     AppState.score++;
     updateProgress();
-
-    const wrongSection   = document.getElementById('feedback-wrong');
-    const correctSection = document.getElementById('feedback-correct');
     if (wrongSection)   wrongSection.classList.add('hidden');
     if (correctSection) {
       correctSection.classList.remove('hidden');
@@ -202,12 +209,10 @@ function checkAnswer() {
       if (praiseEl) praiseEl.textContent = randomPraise();
     }
   } else {
-    const wrongSection   = document.getElementById('feedback-wrong');
-    const correctSection = document.getElementById('feedback-correct');
     if (correctSection) correctSection.classList.add('hidden');
     if (wrongSection)   wrongSection.classList.remove('hidden');
 
-    // 不正解フィードバック描画
+    // 不正解フィードバック描画 (BUG-C 修正済み)
     if (typeof drawWrongFeedback === 'function') {
       const cvs = document.getElementById('canvas-wrong');
       if (cvs) drawWrongFeedback(cvs, problem, userLines);
@@ -240,17 +245,18 @@ function showResult() {
 }
 
 // ─────────────────────────────────────────
-// ゲーム開始 (Gemini API 呼び出し + フォールバック)
+// ゲーム開始 (ESC-01: GeminiAPI を typeof ガードで保護)
 // ─────────────────────────────────────────
 async function startGame() {
   const level = AppState.level;
-  AppState.score = 0;
-  AppState.index = 0;
+  AppState.score    = 0;
+  AppState.index    = 0;
+  AppState.problems = [];
 
   const apiKey = loadApiKey();
   AppState.apiKey = apiKey;
 
-  // APIキー未設定 → ローカル問題に即フォールバック
+  // ── APIキー未設定 → ローカル問題に即フォールバック ──
   if (!apiKey) {
     AppState.problems = getProblems(level);
     showScreen('game');
@@ -258,15 +264,30 @@ async function startGame() {
     return;
   }
 
+  // ── ESC-01: GeminiAPI 存在確認 ──
+  const geminiAvailable = typeof GeminiAPI !== 'undefined';
+
   // モデルチェーン未設定のアラート
-  if (!GeminiAPI.loadAdminChain()) {
+  if (geminiAvailable && !GeminiAPI.loadAdminChain()) {
     showErrorBanner(
       'AIモデルの優先順位が未設定です。管理者設定から設定してください。',
       'info'
     );
   }
 
-  // Gemini 生成（20 秒タイムアウト）
+  // GeminiAPI が利用不可の場合は即フォールバック
+  if (!geminiAvailable) {
+    showErrorBanner(
+      'AI機能を読み込めませんでした。ローカル問題を使用します。',
+      'error'
+    );
+    AppState.problems = getProblems(level);
+    showScreen('game');
+    loadQuestion(0);
+    return;
+  }
+
+  // ── Gemini 生成（20 秒タイムアウト）──
   showLoading(true);
   try {
     const timeoutPromise = new Promise((_, reject) =>
@@ -279,15 +300,22 @@ async function startGame() {
 
     geminiStatusUpdate(result);
 
-    AppState.problems = result.problems && result.problems.length >= MAX_QUESTIONS
-      ? result.problems.slice(0, MAX_QUESTIONS)
-      : getProblems(level);
+    AppState.problems =
+      result && result.problems && result.problems.length >= MAX_QUESTIONS
+        ? result.problems.slice(0, MAX_QUESTIONS)
+        : getProblems(level);
 
   } catch (err) {
     if (err.message === 'TIMEOUT') {
-      showErrorBanner('AI生成がタイムアウトしました。ローカル問題を使用します。', 'error');
+      showErrorBanner(
+        'AI生成がタイムアウトしました。ローカル問題を使用します。',
+        'error'
+      );
     } else {
-      showErrorBanner('AI生成でエラーが発生しました。ローカル問題を使用します。', 'error');
+      showErrorBanner(
+        'AI生成でエラーが発生しました。ローカル問題を使用します。',
+        'error'
+      );
     }
     AppState.problems = getProblems(level);
   } finally {
@@ -323,7 +351,7 @@ function geminiStatusUpdate(result) {
 // ─────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
 
-  // --- レベルボタン ---
+  // ── レベルボタン ──
   document.querySelectorAll('.level-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       document.querySelectorAll('.level-btn').forEach(b => b.classList.remove('selected'));
@@ -333,12 +361,20 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   });
 
-  // --- スタートボタン ---
-  document.getElementById('btn-start').addEventListener('click', () => {
-    startGame();
+  // ── スタートボタン (ESC-02: 多重起動防止) ──
+  document.getElementById('btn-start').addEventListener('click', async () => {
+    if (_gameStarting) return;
+    _gameStarting = true;
+    document.getElementById('btn-start').disabled = true;
+    try {
+      await startGame();
+    } finally {
+      _gameStarting = false;
+      // ゲーム画面に遷移後は start ボタンが非表示なため再 disabled 制御は不要
+    }
   });
 
-  // --- APIキーパネル ---
+  // ── APIキーパネル ──
   const savedKey = loadApiKey();
   if (savedKey) {
     const inputEl = document.getElementById('api-key-input');
@@ -350,12 +386,16 @@ document.addEventListener('DOMContentLoaded', () => {
     const key = inputEl ? inputEl.value.trim() : '';
     saveApiKey(key);
     hideErrorBanner();
+
     if (!key) {
       showErrorBanner(
         'Gemini APIキーが未設定です。管理者設定からキーを入力してください。',
         'info'
       );
-    } else if (!GeminiAPI.loadAdminChain()) {
+    } else if (
+      typeof GeminiAPI !== 'undefined' &&   // ESC-01
+      !GeminiAPI.loadAdminChain()
+    ) {
       showErrorBanner(
         'AIモデルの優先順位が未設定です。管理者設定から設定してください。',
         'info'
@@ -363,41 +403,39 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  // --- 管理者リンク ---
+  // ── 管理者リンク ──
   document.getElementById('btn-admin')?.addEventListener('click', () => {
     window.open('admin.html', '_blank');
   });
 
-  // --- バナー閉じボタン ---
-  const bannerCloseBtn = document.getElementById('model-error-banner-close');
-  if (bannerCloseBtn) {
-    bannerCloseBtn.addEventListener('click', e => {
-      e.stopPropagation();
-      hideErrorBanner();
-    });
-  }
+  // ── バナー閉じボタン ──
+  document.getElementById('model-error-banner-close')?.addEventListener('click', e => {
+    e.stopPropagation();
+    hideErrorBanner();
+  });
 
-  // --- バナー本体クリック → admin.html ---
-  const banner = document.getElementById('model-error-banner');
-  if (banner) {
-    banner.addEventListener('click', () => {
-      window.open('admin.html', '_blank');
-    });
-  }
+  // ── バナー本体クリック → admin.html ──
+  document.getElementById('model-error-banner')?.addEventListener('click', () => {
+    window.open('admin.html', '_blank');
+  });
 
-  // --- ゲームコントロール ---
+  // ── ゲームコントロール ──
   document.getElementById('btn-clear')?.addEventListener('click', () => {
     if (typeof clearAnswerLines === 'function') clearAnswerLines();
     const problem = AppState.problems[AppState.index];
-    if (problem && typeof drawAnswer === 'function') drawAnswer(problem, AppState.level);
-    if (problem) _refreshOverlayLimit(problem);
+    if (problem) {
+      if (typeof drawAnswer === 'function') drawAnswer(problem, AppState.level);
+      _refreshOverlayLimit(problem);
+    }
   });
 
   document.getElementById('btn-undo')?.addEventListener('click', () => {
     if (typeof undoLastLine === 'function') undoLastLine();
     const problem = AppState.problems[AppState.index];
-    if (problem && typeof drawAnswer === 'function') drawAnswer(problem, AppState.level);
-    if (problem) _refreshOverlayLimit(problem);
+    if (problem) {
+      if (typeof drawAnswer === 'function') drawAnswer(problem, AppState.level);
+      _refreshOverlayLimit(problem);
+    }
   });
 
   document.getElementById('btn-check')?.addEventListener('click', () => {
@@ -408,32 +446,42 @@ document.addEventListener('DOMContentLoaded', () => {
     nextQuestion();
   });
 
-  // --- リトライ ---
-  document.getElementById('btn-retry')?.addEventListener('click', () => {
+  // ── リトライ (ESC-02: 多重起動防止) ──
+  document.getElementById('btn-retry')?.addEventListener('click', async () => {
+    if (_gameStarting) return;
+    _gameStarting = true;
     AppState.score = 0;
     AppState.index = 0;
-    startGame();
+    try {
+      await startGame();
+    } finally {
+      _gameStarting = false;
+    }
   });
 
-  // --- ホーム ---
+  // ── ホーム ──
   document.getElementById('btn-home')?.addEventListener('click', () => {
     showScreen('start');
   });
 
-  // --- デフォルトレベル選択 (Lv1) ---
+  // ── デフォルトレベル選択 (Lv1) ──
   const defaultBtn = document.querySelector('.level-btn[data-level="1"]');
   if (defaultBtn) defaultBtn.click();
 
-  // ─────────────────────────────────────────────
+  // ──────────────────────────────────────────────
   // BUG-F1 修正: setTimeout(block①) を削除し、
   // 以下の即時ブロック(block②) のみで初期バナーを制御
-  // ─────────────────────────────────────────────
+  // ESC-01: GeminiAPI 参照を typeof ガードで保護
+  // ──────────────────────────────────────────────
   if (!loadApiKey()) {
     showErrorBanner(
       'Gemini APIキーが未設定です。管理者設定からキーを入力してください。',
       'info'
     );
-  } else if (!GeminiAPI.loadAdminChain()) {
+  } else if (
+    typeof GeminiAPI !== 'undefined' &&     // ESC-01
+    !GeminiAPI.loadAdminChain()
+  ) {
     showErrorBanner(
       'AIモデルの優先順位が未設定です。管理者設定から設定してください。',
       'info'
