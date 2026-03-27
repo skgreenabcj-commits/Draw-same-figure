@@ -1,455 +1,443 @@
-/* ============================================================
-   app.js  v3.2  ―  BUG-A/E 修正版
-   BUG-A: Lv2/Lv3で canvas-overlay を hidden にしないよう修正
-          → 線本数制限はLv0/Lv1のみ。Lv2/Lv3は常にoverlay表示。
-   BUG-E: 初回バナー条件を loadApiKey() 直接参照に修正
-   ============================================================ */
+// ============================================================
+// app.js  v3.3  (BUG-F1 修正版)
+//   BUG-A  : Lv2/Lv3 のキャンバスオーバーレイを常時表示
+//   BUG-E  : 初期バナー判定を loadApiKey() で直接チェック
+//   BUG-F1 : DOMContentLoaded 内の setTimeout バナーブロック
+//            (block①) を削除し、即時ブロック(block②) に統一
+// ============================================================
 
-/* ---------- 定数 ---------- */
-const GEMINI_TIMEOUT_MS = 20000;
+'use strict';
 
-/* ---------- アプリ状態 ---------- */
+// ─────────────────────────────────────────
+// 定数
+// ─────────────────────────────────────────
+const STORAGE_KEY_API  = 'gemini_api_key';
+const MAX_QUESTIONS    = 5;
+const PRAISE_LIST = [
+  'すごい！', 'やったね！', 'かんぺき！', 'すばらしい！',
+  'よくできました！', 'さすが！', 'すてき！', 'ナイス！',
+];
+
+// ─────────────────────────────────────────
+// アプリ状態
+// ─────────────────────────────────────────
 const AppState = {
-  level        : 1,
-  problems     : [],
-  currentIndex : 0,
-  score        : 0,
-  apiKey       : ''
+  level    : 1,
+  problems : [],
+  index    : 0,
+  score    : 0,
+  apiKey   : '',
 };
 
-/* ---------- 称賛メッセージ ---------- */
-const PRAISE_LIST = [
-  'すごい！ぴったり！', 'かんぺき！！ 🎉', 'やったね！ばっちり！', 'さすが！！ てんさい！',
-  'せいかい！よくできました！', 'かっこいい！', 'おみごと！！ 🌟', 'すばらしい！！'
-];
+// ─────────────────────────────────────────
+// ユーティリティ
+// ─────────────────────────────────────────
 function randomPraise() {
   return PRAISE_LIST[Math.floor(Math.random() * PRAISE_LIST.length)];
 }
 
-/* ============================================================
-   画面切り替え
-   ============================================================ */
-function showScreen(id) {
-  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
-  const el = document.getElementById(id);
-  if (el) el.classList.add('active');
+function loadApiKey() {
+  return localStorage.getItem(STORAGE_KEY_API) || '';
 }
 
-/* ============================================================
-   ローディング
-   ============================================================ */
-function showLoading(show) {
+function saveApiKey(key) {
+  localStorage.setItem(STORAGE_KEY_API, key);
+  AppState.apiKey = key;
+}
+
+// ─────────────────────────────────────────
+// 画面切り替え
+// ─────────────────────────────────────────
+function showScreen(name) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.add('hidden'));
+  const target = document.getElementById(`screen-${name}`);
+  if (target) target.classList.remove('hidden');
+}
+
+// ─────────────────────────────────────────
+// ローディングオーバーレイ
+// ─────────────────────────────────────────
+function showLoading(visible) {
   const el = document.getElementById('loading-overlay');
-  if (el) el.classList.toggle('hidden', !show);
+  if (!el) return;
+  el.classList.toggle('hidden', !visible);
 }
 
-/* ============================================================
-   エラーバナー
-   ============================================================ */
+// ─────────────────────────────────────────
+// エラーバナー
+// ─────────────────────────────────────────
 function showErrorBanner(message, type = 'error') {
   const banner = document.getElementById('model-error-banner');
-  const textEl = document.getElementById('model-error-banner-text');
-  if (!banner) return;
-  if (textEl) {
-    textEl.textContent = type === 'error'
-      ? `⚠️ AI: ${message}　（タップして管理者設定）`
-      : `💡 ${message}　（タップして管理者設定）`;
-  }
-  banner.className = `model-error-banner model-error-banner--${type}`;
+  const text   = document.getElementById('model-error-banner-text');
+  if (!banner || !text) return;
+  text.textContent = message;
+  banner.dataset.type = type;
   banner.classList.remove('hidden');
 }
 
 function hideErrorBanner() {
-  const el = document.getElementById('model-error-banner');
-  if (el) el.classList.add('hidden');
+  const banner = document.getElementById('model-error-banner');
+  if (banner) banner.classList.add('hidden');
 }
 
-/* ============================================================
-   進捗・スコア表示
-   ============================================================ */
+// ─────────────────────────────────────────
+// 進捗・スコア表示
+// ─────────────────────────────────────────
 function updateProgress() {
-  const total = AppState.problems.length;
-  const cur   = AppState.currentIndex + 1;
-  const pt = document.getElementById('progress-text');
-  const pb = document.getElementById('progress-bar');
-  const st = document.getElementById('score-text');
-  if (pt) pt.textContent = `${cur} / ${total}もん`;
-  if (pb) pb.style.width = `${(cur / total) * 100}%`;
-  if (st) st.textContent = `⭐ ${AppState.score}`;
+  const el = document.getElementById('progress-text');
+  if (el) el.textContent = `${AppState.index + 1} / ${MAX_QUESTIONS}もん`;
+
+  const bar = document.getElementById('progress-bar');
+  if (bar) bar.style.width = `${(AppState.index / MAX_QUESTIONS) * 100}%`;
+
+  const score = document.getElementById('score-display');
+  if (score) score.textContent = `⭐ ${AppState.score}`;
 }
 
-/* ============================================================
-   ヒントメッセージ
-   ============================================================ */
+// ─────────────────────────────────────────
+// ヒントメッセージ
+// ─────────────────────────────────────────
 function updateHintMsg(problem) {
-  const hintEl = document.getElementById('hint-msg');
-  if (!hintEl) return;
-  if (problem.level !== 0 && problem.level !== 1) {
-    hintEl.classList.add('hidden');
-    return;
-  }
-  const remain = problem.lines.length - (problem.hintLines || []).length;
-  const rEl = document.getElementById('hint-remain');
-  if (rEl) rEl.textContent = remain;
-  hintEl.classList.remove('hidden');
-}
+  const el = document.getElementById('hint-msg');
+  if (!el) return;
 
-/* ============================================================
-   線数上限管理  ★ BUG-A 修正
-   Lv0/Lv1: 描ける線の本数に上限あり → 上限到達でoverlay表示し追加不可
-   Lv2/Lv3: 本数制限なし → overlayは常にremove('hidden')のまま
-   ============================================================ */
-function _refreshOverlayLimit(problem, lineCount) {
-  const ov = document.getElementById('canvas-overlay');
-  if (!ov) return;
-
-  /* ★ BUG-A修正: Lv2/Lv3 は overlay を hidden にしない
-     （旧コードは ov.classList.add('hidden') していたため線が引けなかった） */
-  if (problem.level !== 0 && problem.level !== 1) {
-    ov.classList.remove('hidden');
-    return;
-  }
-
-  /* Lv0/Lv1: 残り本数管理 */
-  const maxLines = problem.lines.length - (problem.hintLines || []).length;
-  if (lineCount >= maxLines) {
-    ov.classList.add('hidden');   // 上限到達 → 追加不可
+  const count = Array.isArray(problem.hintLines) ? problem.hintLines.length : 0;
+  if (count > 0) {
+    el.textContent = `さいしょの ${count} ほんは かいてあるよ！`;
+    el.classList.remove('hidden');
   } else {
-    ov.classList.remove('hidden'); // 上限未満 → 引ける
+    el.classList.add('hidden');
   }
 }
 
-/* ============================================================
-   判定  ★ norm 関数を辞書順比較に修正
-   旧: Math.min(x1,x2),Math.min(y1,y2) を独立に使用
-       → 異なる斜め線が同一キーになる誤判定が発生
-   新: 始点・終点を文字列として辞書順で統一
-       → 方向違いの同一線は同じキー、異なる線は必ず異なるキー
-   ============================================================ */
-function judgeAnswer(problem, userLines) {
-  const correct = problem.lines;
-  const hint    = problem.hintLines || [];
-  const allUser = [...hint, ...userLines];
-  if (allUser.length !== correct.length) return false;
+// ─────────────────────────────────────────
+// オーバーレイ上限管理 (BUG-A 修正済み)
+// ─────────────────────────────────────────
+function _refreshOverlayLimit(problem) {
+  const overlay = document.getElementById('canvas-overlay');
+  if (!overlay) return;
 
-  /* ★ 修正: 始点・終点を辞書順で統一して正規化する
-     例: {x1:3,y1:0,x2:0,y2:3} → "0,3-3,0"（逆方向でも同一キー）
-         {x1:0,y1:1,x2:3,y2:2} → "0,1-3,2"（別線とは異なるキー）  */
+  // Lv2/Lv3 は常にオーバーレイを表示（線数無制限）
+  if (AppState.level >= 2) {
+    overlay.classList.remove('hidden');
+    return;
+  }
+
+  // Lv0/Lv1 は解答線が上限に達したら描画を止める
+  const userLines  = getAnswerLines ? getAnswerLines() : [];
+  const hintCount  = Array.isArray(problem.hintLines) ? problem.hintLines.length : 0;
+  const totalLines = problem.lines ? problem.lines.length : 0;
+  const limit      = totalLines - hintCount;
+
+  if (userLines.length >= limit) {
+    overlay.classList.add('hidden');
+  } else {
+    overlay.classList.remove('hidden');
+  }
+}
+
+// ─────────────────────────────────────────
+// 正解判定
+// ─────────────────────────────────────────
+function judgeAnswer(problem, userLines) {
   const norm = l => {
     const p1 = `${l.x1},${l.y1}`;
     const p2 = `${l.x2},${l.y2}`;
     return p1 <= p2 ? `${p1}-${p2}` : `${p2}-${p1}`;
   };
 
-  const correctSet = new Set(correct.map(norm));
-  for (const line of allUser) {
-    if (!correctSet.has(norm(line))) return false;
+  const hintLines  = Array.isArray(problem.hintLines) ? problem.hintLines : [];
+  const allLines   = [...hintLines, ...userLines];
+  const answerSet  = new Set(problem.lines.map(norm));
+  const submittedSet = new Set(allLines.map(norm));
+
+  if (submittedSet.size !== answerSet.size) return false;
+  for (const key of answerSet) {
+    if (!submittedSet.has(key)) return false;
   }
-  return new Set(allUser.map(norm)).size === correctSet.size;
+  return true;
 }
 
-/* ============================================================
-   問題読み込み
-   ============================================================ */
+// ─────────────────────────────────────────
+// 問題読み込み
+// ─────────────────────────────────────────
 function loadQuestion(index) {
-  const problem = AppState.problems[index];
-  if (!problem) {
-    console.error('loadQuestion: problem undefined at index', index,
-                  'problems:', AppState.problems);
-    return;
-  }
-  AppState.currentIndex = index;
+  AppState.index = index;
+  const problem  = AppState.problems[index];
+  if (!problem) return;
+
   updateProgress();
   updateHintMsg(problem);
-  initCanvases(problem);
-  buildGridHeaders(problem);
 
-  setTimeout(() => {
-    requestAnimationFrame(() => {
-      drawModel(problem);
-      drawAnswer(problem);
-      setupInteraction(problem, (lineCount) => {
-        _refreshOverlayLimit(problem, lineCount);
-      });
-      _refreshOverlayLimit(problem, 0);
-    });
-  }, 0);
+  // キャンバス初期化
+  if (typeof initCanvases === 'function') {
+    initCanvases(problem, AppState.level);
+  }
+
+  _refreshOverlayLimit(problem);
 }
 
-/* ============================================================
-   答え合わせ
-   ============================================================ */
+// ─────────────────────────────────────────
+// 回答チェック
+// ─────────────────────────────────────────
 function checkAnswer() {
-  const problem = AppState.problems[AppState.currentIndex];
+  const problem   = AppState.problems[AppState.index];
   if (!problem) return;
-  const userLines = getAnswerLines();
-  const isCorrect = judgeAnswer(problem, userLines);
+  const userLines = typeof getAnswerLines === 'function' ? getAnswerLines() : [];
+  const correct   = judgeAnswer(problem, userLines);
 
   const overlay = document.getElementById('feedback-overlay');
   if (overlay) overlay.classList.remove('hidden');
 
-  if (isCorrect) {
+  if (correct) {
     AppState.score++;
-    const st = document.getElementById('score-text');
-    if (st) st.textContent = `⭐ ${AppState.score}`;
-    document.getElementById('feedback-wrong')?.classList.add('hidden');
-    document.getElementById('feedback-correct')?.classList.remove('hidden');
-    const pt = document.getElementById('praise-text');
-    if (pt) pt.textContent = randomPraise();
-    const img = document.querySelector('.gotit-img');
-    if (img) { img.style.animation = 'none'; img.offsetHeight; img.style.animation = ''; }
+    updateProgress();
+
+    const wrongSection   = document.getElementById('feedback-wrong');
+    const correctSection = document.getElementById('feedback-correct');
+    if (wrongSection)   wrongSection.classList.add('hidden');
+    if (correctSection) {
+      correctSection.classList.remove('hidden');
+      const praiseEl = document.getElementById('praise-msg');
+      if (praiseEl) praiseEl.textContent = randomPraise();
+    }
   } else {
-    document.getElementById('feedback-correct')?.classList.add('hidden');
-    document.getElementById('feedback-wrong')?.classList.remove('hidden');
+    const wrongSection   = document.getElementById('feedback-wrong');
+    const correctSection = document.getElementById('feedback-correct');
+    if (correctSection) correctSection.classList.add('hidden');
+    if (wrongSection)   wrongSection.classList.remove('hidden');
+
+    // 不正解フィードバック描画
     if (typeof drawWrongFeedback === 'function') {
-      drawWrongFeedback(problem, userLines);
+      const cvs = document.getElementById('canvas-wrong');
+      if (cvs) drawWrongFeedback(cvs, problem, userLines);
     }
   }
 }
 
-/* ============================================================
-   次の問題へ
-   ============================================================ */
-function goNext() {
-  document.getElementById('feedback-overlay')?.classList.add('hidden');
-  const next = AppState.currentIndex + 1;
-  if (next >= AppState.problems.length) showResult();
-  else loadQuestion(next);
-}
+// ─────────────────────────────────────────
+// 次の問題へ
+// ─────────────────────────────────────────
+function nextQuestion() {
+  const overlay = document.getElementById('feedback-overlay');
+  if (overlay) overlay.classList.add('hidden');
 
-/* ============================================================
-   結果画面
-   ============================================================ */
-function showResult() {
-  showScreen('screen-result');
-  const score = AppState.score;
-  const total = AppState.problems.length;
-  const fs = document.getElementById('final-score');
-  if (fs) fs.textContent = score;
-  const rm = document.getElementById('result-msg');
-  if (rm) {
-    if (score === total)           rm.textContent = 'ぜんぶせいかい！！ あなたはてんさい！🎉';
-    else if (score >= total * 0.8) rm.textContent = 'とてもよくできました！';
-    else if (score >= total * 0.6) rm.textContent = 'よくがんばりました！';
-    else                           rm.textContent = 'がんばった！またあそぼう！！';
+  const next = AppState.index + 1;
+  if (next >= MAX_QUESTIONS) {
+    showResult();
+  } else {
+    loadQuestion(next);
   }
 }
 
-/* ============================================================
-   ゲーム開始
-   ============================================================ */
+// ─────────────────────────────────────────
+// 結果画面
+// ─────────────────────────────────────────
+function showResult() {
+  showScreen('result');
+  const el = document.getElementById('final-score');
+  if (el) el.textContent = `${AppState.score} / ${MAX_QUESTIONS}もん せいかい！`;
+}
+
+// ─────────────────────────────────────────
+// ゲーム開始 (Gemini API 呼び出し + フォールバック)
+// ─────────────────────────────────────────
 async function startGame() {
   const level = AppState.level;
-  showLoading(true);
-  hideErrorBanner();
+  AppState.score = 0;
+  AppState.index = 0;
 
-  let problems = null;
+  const apiKey = loadApiKey();
+  AppState.apiKey = apiKey;
 
-  /* ── Gemini 生成（APIキーがある場合のみ） ── */
-  const apiKey = (typeof loadApiKey === 'function') ? loadApiKey() : AppState.apiKey;
-  if (apiKey) {
-    try {
-      const result = await Promise.race([
-        generateProblems(level),
-        new Promise((_, rej) =>
-          setTimeout(() => rej(new Error('timeout')), GEMINI_TIMEOUT_MS)
-        ),
-      ]);
-      if (result && Array.isArray(result.problems) && result.problems.length > 0) {
-        problems = result.problems;
-        if (result.alertType) {
-          showErrorBanner(
-            result.alertType === 'MODEL'  ? 'AIモデルを変更してください' :
-            result.alertType === 'PROMPT' ? 'AI出力が不正です。管理者設定を確認してください' :
-            result.alertType === 'LEVEL'  ? '有効な問題数が少ないです' :
-            result.alertType,
-            'error'
-          );
-        }
-      } else if (Array.isArray(result) && result.length > 0) {
-        problems = result;
-      }
-    } catch (e) {
-      console.warn('Gemini 失敗:', e.message);
-      showErrorBanner('AI生成に失敗しました。ローカル問題を使用します。', 'info');
-    }
-  }
-
-  /* ── ローカル問題フォールバック ── */
-  if (!problems || !problems.length) {
-    if (typeof getProblems === 'function') {
-      problems = getProblems(level);
-    }
-  }
-
-  showLoading(false);
-
-  if (!problems || !problems.length) {
-    showErrorBanner('問題を取得できませんでした。');
+  // APIキー未設定 → ローカル問題に即フォールバック
+  if (!apiKey) {
+    AppState.problems = getProblems(level);
+    showScreen('game');
+    loadQuestion(0);
     return;
   }
 
-  AppState.problems     = problems;
-  AppState.score        = 0;
-  AppState.currentIndex = 0;
+  // モデルチェーン未設定のアラート
+  if (!GeminiAPI.loadAdminChain()) {
+    showErrorBanner(
+      'AIモデルの優先順位が未設定です。管理者設定から設定してください。',
+      'info'
+    );
+  }
 
-  showScreen('screen-game');
-  setTimeout(() => {
-    requestAnimationFrame(() => {
-      loadQuestion(0);
-    });
-  }, 0);
+  // Gemini 生成（20 秒タイムアウト）
+  showLoading(true);
+  try {
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('TIMEOUT')), 20000)
+    );
+    const result = await Promise.race([
+      GeminiAPI.generateProblems(level),
+      timeoutPromise,
+    ]);
+
+    geminiStatusUpdate(result);
+
+    AppState.problems = result.problems && result.problems.length >= MAX_QUESTIONS
+      ? result.problems.slice(0, MAX_QUESTIONS)
+      : getProblems(level);
+
+  } catch (err) {
+    if (err.message === 'TIMEOUT') {
+      showErrorBanner('AI生成がタイムアウトしました。ローカル問題を使用します。', 'error');
+    } else {
+      showErrorBanner('AI生成でエラーが発生しました。ローカル問題を使用します。', 'error');
+    }
+    AppState.problems = getProblems(level);
+  } finally {
+    showLoading(false);
+  }
+
+  showScreen('game');
+  loadQuestion(0);
 }
 
-/* ============================================================
-   Gemini ステータス更新コールバック
-   ============================================================ */
-function geminiStatusUpdate(status) {
-  if (!status) return;
-  if (status.alertType) {
-    showErrorBanner(status.message || status.alertType);
-  } else {
-    hideErrorBanner();
+// ─────────────────────────────────────────
+// Gemini ステータス更新
+// ─────────────────────────────────────────
+function geminiStatusUpdate(result) {
+  if (!result) return;
+  const { alertType, validCount } = result;
+
+  if (alertType === 'error') {
+    showErrorBanner(
+      `AIが有効な問題を生成できませんでした（有効数: ${validCount}）。ローカル問題を使用します。`,
+      'error'
+    );
+  } else if (alertType === 'warn') {
+    showErrorBanner(
+      `AI生成問題が不足しています（有効数: ${validCount}）。一部ローカル問題で補完しました。`,
+      'info'
+    );
   }
 }
 
-/* ============================================================
-   DOMContentLoaded
-   ============================================================ */
+// ─────────────────────────────────────────
+// DOMContentLoaded
+// ─────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
 
-  /* レベル選択 */
+  // --- レベルボタン ---
   document.querySelectorAll('.level-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       document.querySelectorAll('.level-btn').forEach(b => b.classList.remove('selected'));
       btn.classList.add('selected');
       AppState.level = parseInt(btn.dataset.level, 10);
-      const sb = document.getElementById('btn-start');
-      if (sb) sb.disabled = false;
+      document.getElementById('btn-start').disabled = false;
     });
   });
 
-  /* はじめる */
-  document.getElementById('btn-start')
-    ?.addEventListener('click', startGame);
+  // --- スタートボタン ---
+  document.getElementById('btn-start').addEventListener('click', () => {
+    startGame();
+  });
 
-  /* APIキー */
-  document.getElementById('btn-toggle-api')
-    ?.addEventListener('click', () => {
-      document.getElementById('api-key-panel')?.classList.toggle('hidden');
-    });
-
-  document.getElementById('btn-save-api')
-    ?.addEventListener('click', () => {
-      const input = document.getElementById('input-api-key');
-      const key   = input ? input.value.trim() : '';
-      if (key) {
-        if (typeof saveApiKey === 'function') saveApiKey(key);
-        AppState.apiKey = key;
-        alert('APIキーを保存しました。');
-      } else {
-        if (typeof saveApiKey === 'function') saveApiKey('');
-        AppState.apiKey = '';
-        hideErrorBanner();
-        alert('APIキーをクリアしました。');
-      }
-    });
-
-  /* 保存済みAPIキーの読み込み */
-  const savedKey = (typeof loadApiKey === 'function') ? loadApiKey() : '';
+  // --- APIキーパネル ---
+  const savedKey = loadApiKey();
   if (savedKey) {
-    AppState.apiKey = savedKey;
-    const inputEl = document.getElementById('input-api-key');
+    const inputEl = document.getElementById('api-key-input');
     if (inputEl) inputEl.value = savedKey;
   }
 
-  /* 管理者設定 */
-  document.getElementById('btn-admin-model')
-    ?.addEventListener('click', () => window.open('admin.html', '_blank'));
+  document.getElementById('btn-save-api-key')?.addEventListener('click', () => {
+    const inputEl = document.getElementById('api-key-input');
+    const key = inputEl ? inputEl.value.trim() : '';
+    saveApiKey(key);
+    hideErrorBanner();
+    if (!key) {
+      showErrorBanner(
+        'Gemini APIキーが未設定です。管理者設定からキーを入力してください。',
+        'info'
+      );
+    } else if (!GeminiAPI.loadAdminChain()) {
+      showErrorBanner(
+        'AIモデルの優先順位が未設定です。管理者設定から設定してください。',
+        'info'
+      );
+    }
+  });
 
-  document.getElementById('model-error-banner')
-    ?.addEventListener('click', (e) => {
-      if (!e.target.closest('#model-error-banner-close')) {
-        window.open('admin.html', '_blank');
-      }
-    });
+  // --- 管理者リンク ---
+  document.getElementById('btn-admin')?.addEventListener('click', () => {
+    window.open('admin.html', '_blank');
+  });
 
-  document.getElementById('model-error-banner-close')
-    ?.addEventListener('click', (e) => {
+  // --- バナー閉じボタン ---
+  const bannerCloseBtn = document.getElementById('model-error-banner-close');
+  if (bannerCloseBtn) {
+    bannerCloseBtn.addEventListener('click', e => {
       e.stopPropagation();
       hideErrorBanner();
     });
-
-  /* ゲーム操作 */
-  document.getElementById('btn-home')
-    ?.addEventListener('click', () => {
-      if (confirm('ホームに戻りますか？')) showScreen('screen-start');
-    });
-
-  document.getElementById('btn-clear')
-    ?.addEventListener('click', () => {
-      clearAnswerLines();
-      const p = AppState.problems[AppState.currentIndex];
-      if (p) _refreshOverlayLimit(p, 0);
-    });
-
-  document.getElementById('btn-undo')
-    ?.addEventListener('click', () => {
-      undoLastLine();
-      const p   = AppState.problems[AppState.currentIndex];
-      const cnt = getAnswerLines().length;
-      if (p) _refreshOverlayLimit(p, cnt);
-    });
-
-  document.getElementById('btn-check')
-    ?.addEventListener('click', checkAnswer);
-
-  /* フィードバック */
-  document.getElementById('btn-next-wrong')
-    ?.addEventListener('click', goNext);
-  document.getElementById('btn-next-correct')
-    ?.addEventListener('click', goNext);
-
-  /* 結果画面 */
-  document.getElementById('btn-retry')
-    ?.addEventListener('click', () => {
-      AppState.score        = 0;
-      AppState.currentIndex = 0;
-      showScreen('screen-start');
-    });
-  document.getElementById('btn-result-home')
-    ?.addEventListener('click', () => showScreen('screen-start'));
-
-  /* geminiStatusUpdate イベント監視 */
-  window.addEventListener('geminiStatusUpdate', (e) => {
-    const status = e.detail;
-    if (!status) return;
-    if (status.alertType) showErrorBanner(status.lastError || status.alertType, 'error');
-  });
-
-  /* デフォルトレベル選択（Lv1） */
-  const defaultLvBtn = document.querySelector('.level-btn[data-level="1"]');
-  if (defaultLvBtn) {
-    defaultLvBtn.classList.add('selected');
-    AppState.level = 1;
-    const sb = document.getElementById('btn-start');
-    if (sb) sb.disabled = false;
   }
 
-  /* ★ BUG-E修正: loadApiKey() を直接参照して判定 */
-  const currentKey = (typeof loadApiKey === 'function') ? loadApiKey() : '';
-  if (currentKey && typeof loadAdminChain === 'function' && !loadAdminChain()) {
-    setTimeout(() =>
-      showErrorBanner('AIモデルが未設定です。管理者設定から推奨モデルを選んでください。', 'info'),
-      600
+  // --- バナー本体クリック → admin.html ---
+  const banner = document.getElementById('model-error-banner');
+  if (banner) {
+    banner.addEventListener('click', () => {
+      window.open('admin.html', '_blank');
+    });
+  }
+
+  // --- ゲームコントロール ---
+  document.getElementById('btn-clear')?.addEventListener('click', () => {
+    if (typeof clearAnswerLines === 'function') clearAnswerLines();
+    const problem = AppState.problems[AppState.index];
+    if (problem && typeof drawAnswer === 'function') drawAnswer(problem, AppState.level);
+    if (problem) _refreshOverlayLimit(problem);
+  });
+
+  document.getElementById('btn-undo')?.addEventListener('click', () => {
+    if (typeof undoLastLine === 'function') undoLastLine();
+    const problem = AppState.problems[AppState.index];
+    if (problem && typeof drawAnswer === 'function') drawAnswer(problem, AppState.level);
+    if (problem) _refreshOverlayLimit(problem);
+  });
+
+  document.getElementById('btn-check')?.addEventListener('click', () => {
+    checkAnswer();
+  });
+
+  document.getElementById('btn-next')?.addEventListener('click', () => {
+    nextQuestion();
+  });
+
+  // --- リトライ ---
+  document.getElementById('btn-retry')?.addEventListener('click', () => {
+    AppState.score = 0;
+    AppState.index = 0;
+    startGame();
+  });
+
+  // --- ホーム ---
+  document.getElementById('btn-home')?.addEventListener('click', () => {
+    showScreen('start');
+  });
+
+  // --- デフォルトレベル選択 (Lv1) ---
+  const defaultBtn = document.querySelector('.level-btn[data-level="1"]');
+  if (defaultBtn) defaultBtn.click();
+
+  // ─────────────────────────────────────────────
+  // BUG-F1 修正: setTimeout(block①) を削除し、
+  // 以下の即時ブロック(block②) のみで初期バナーを制御
+  // ─────────────────────────────────────────────
+  if (!loadApiKey()) {
+    showErrorBanner(
+      'Gemini APIキーが未設定です。管理者設定からキーを入力してください。',
+      'info'
+    );
+  } else if (!GeminiAPI.loadAdminChain()) {
+    showErrorBanner(
+      'AIモデルの優先順位が未設定です。管理者設定から設定してください。',
+      'info'
     );
   }
 
-    /* Geminiの設定不十分の際のアラート */
-   if (!loadApiKey()) {
-     showErrorBanner('Gemini APIキーが未設定です。管理者設定からキーを入力してください。', 'info');
-   } else if (!GeminiAPI.loadAdminChain()) {
-     showErrorBanner('AIモデルの優先順位が未設定です。管理者設定から設定してください。', 'info');
-}
-  
-});
+}); // DOMContentLoaded end
