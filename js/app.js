@@ -1,11 +1,19 @@
 // ============================================================
-// app.js  v3.4
-//   BUG-A  : Lv2/Lv3 のキャンバスオーバーレイを常時表示
-//   BUG-E  : 初期バナー判定を loadApiKey() で直接チェック
-//   BUG-F1 : DOMContentLoaded の setTimeout バナーブロック削除
-//   ESC-01 : GeminiAPI 参照を typeof ガードで保護
-//   ESC-02 : btn-start / btn-retry の多重起動を _gameStarting
-//            フラグで防止、startGame を await で正しく待機
+// app.js  v3.5
+//   BUG-1  : showScreen を .active クラス制御に修正
+//   BUG-2  : loadQuestion に drawModel/drawAnswer/setupInteraction を追加
+//   BUG-3  : drawWrongFeedback のシグネチャを canvas.js 定義に合わせる
+//   BUG-4  : score-display → score-text
+//   BUG-5  : praise-msg → praise-text
+//   BUG-6  : btn-next → btn-next-wrong / btn-next-correct
+//   BUG-7  : api-key-input → input-api-key
+//   BUG-8  : btn-save-api-key → btn-save-api
+//   BUG-9  : btn-admin → btn-admin-model
+//   BUG-10 : btn-result-home リスナー追加
+//   BUG-11 : btn-toggle-api リスナー追加（APIキーパネル開閉）
+//   BUG-12 : final-score には数字のみ書込み
+//   ESC-01 : GeminiAPI 参照を typeof ガードで保護（維持）
+//   ESC-02 : btn-start / btn-retry 多重起動防止（維持）
 // ============================================================
 
 'use strict';
@@ -51,12 +59,12 @@ function saveApiKey(key) {
 }
 
 // ─────────────────────────────────────────
-// 画面切り替え
+// 画面切り替え (BUG-1 修正: .active クラスで制御)
 // ─────────────────────────────────────────
 function showScreen(name) {
-  document.querySelectorAll('.screen').forEach(s => s.classList.add('hidden'));
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
   const target = document.getElementById(`screen-${name}`);
-  if (target) target.classList.remove('hidden');
+  if (target) target.classList.add('active');
 }
 
 // ─────────────────────────────────────────
@@ -86,7 +94,7 @@ function hideErrorBanner() {
 }
 
 // ─────────────────────────────────────────
-// 進捗・スコア表示
+// 進捗・スコア表示 (BUG-4 修正: score-text)
 // ─────────────────────────────────────────
 function updateProgress() {
   const el = document.getElementById('progress-text');
@@ -95,7 +103,8 @@ function updateProgress() {
   const bar = document.getElementById('progress-bar');
   if (bar) bar.style.width = `${(AppState.index / MAX_QUESTIONS) * 100}%`;
 
-  const score = document.getElementById('score-display');
+  // BUG-4 修正: 'score-display' → 'score-text'
+  const score = document.getElementById('score-text');
   if (score) score.textContent = `⭐ ${AppState.score}`;
 }
 
@@ -145,7 +154,6 @@ function _refreshOverlayLimit(problem) {
 // 正解判定
 // ─────────────────────────────────────────
 function judgeAnswer(problem, userLines) {
-  // 線を方向非依存の文字列キーに正規化
   const norm = l => {
     const p1 = `${l.x1},${l.y1}`;
     const p2 = `${l.x2},${l.y2}`;
@@ -166,6 +174,7 @@ function judgeAnswer(problem, userLines) {
 
 // ─────────────────────────────────────────
 // 問題読み込み
+// (BUG-2 修正: initCanvases後に drawModel/drawAnswer/setupInteraction を呼ぶ)
 // ─────────────────────────────────────────
 function loadQuestion(index) {
   AppState.index = index;
@@ -175,16 +184,33 @@ function loadQuestion(index) {
   updateProgress();
   updateHintMsg(problem);
 
-  // キャンバス初期化
+  // BUG-2 修正:
+  //   initCanvases はリセットのみ（canvas を 1×1 に縮小）。
+  //   描画は drawModel / drawAnswer / setupInteraction を明示的に呼ぶ必要がある。
+  //   showScreen 後のリフロー確定を待つため requestAnimationFrame を2段ネスト。
   if (typeof initCanvases === 'function') {
-    initCanvases(problem, AppState.level);
+    initCanvases(problem);
   }
 
-  _refreshOverlayLimit(problem);
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      if (typeof drawModel       === 'function') drawModel(problem);
+      if (typeof drawAnswer      === 'function') drawAnswer(problem);
+      if (typeof setupInteraction === 'function') {
+        setupInteraction(problem, (lineCount) => {
+          // 線が追加されるたびにオーバーレイ上限を再チェック
+          _refreshOverlayLimit(problem);
+        });
+      }
+      _refreshOverlayLimit(problem);
+    });
+  });
 }
 
 // ─────────────────────────────────────────
 // 回答チェック
+// (BUG-3 修正: drawWrongFeedback のシグネチャを canvas.js に合わせる)
+// (BUG-5 修正: praise-text)
 // ─────────────────────────────────────────
 function checkAnswer() {
   const problem = AppState.problems[AppState.index];
@@ -205,23 +231,25 @@ function checkAnswer() {
     if (wrongSection)   wrongSection.classList.add('hidden');
     if (correctSection) {
       correctSection.classList.remove('hidden');
-      const praiseEl = document.getElementById('praise-msg');
+      // BUG-5 修正: 'praise-msg' → 'praise-text'
+      const praiseEl = document.getElementById('praise-text');
       if (praiseEl) praiseEl.textContent = randomPraise();
     }
   } else {
     if (correctSection) correctSection.classList.add('hidden');
     if (wrongSection)   wrongSection.classList.remove('hidden');
 
-    // 不正解フィードバック描画 (BUG-C 修正済み)
+    // BUG-3 修正: canvas.js の drawWrongFeedback(problem, userLines) に合わせる
+    // 旧: drawWrongFeedback(cvs, problem, userLines)  ← 第1引数にDOM要素を渡していた
+    // 新: drawWrongFeedback(problem, userLines)       ← canvas は内部で getElementById
     if (typeof drawWrongFeedback === 'function') {
-      const cvs = document.getElementById('canvas-wrong');
-      if (cvs) drawWrongFeedback(cvs, problem, userLines);
+      drawWrongFeedback(problem, userLines);
     }
   }
 }
 
 // ─────────────────────────────────────────
-// 次の問題へ
+// 次の問題へ (BUG-6 修正: btn-next-wrong / btn-next-correct で登録)
 // ─────────────────────────────────────────
 function nextQuestion() {
   const overlay = document.getElementById('feedback-overlay');
@@ -236,12 +264,14 @@ function nextQuestion() {
 }
 
 // ─────────────────────────────────────────
-// 結果画面
+// 結果画面 (BUG-12 修正: final-score に数字のみ書込み)
 // ─────────────────────────────────────────
 function showResult() {
   showScreen('result');
+  // BUG-12 修正: HTML は <span id="final-score">0</span> / 5もん の構造。
+  // 数字のみを書き込む。文章は HTML 側に固定されている。
   const el = document.getElementById('final-score');
-  if (el) el.textContent = `${AppState.score} / ${MAX_QUESTIONS}もん せいかい！`;
+  if (el) el.textContent = String(AppState.score);
 }
 
 // ─────────────────────────────────────────
@@ -370,19 +400,28 @@ document.addEventListener('DOMContentLoaded', () => {
       await startGame();
     } finally {
       _gameStarting = false;
-      // ゲーム画面に遷移後は start ボタンが非表示なため再 disabled 制御は不要
     }
   });
 
-  // ── APIキーパネル ──
+  // ── APIキーパネル開閉 (BUG-11 修正: btn-toggle-api) ──
+  document.getElementById('btn-toggle-api')?.addEventListener('click', () => {
+    const panel = document.getElementById('api-key-panel');
+    if (!panel) return;
+    panel.classList.toggle('hidden');
+  });
+
+  // ── APIキー保存 (BUG-7/8 修正: input-api-key / btn-save-api) ──
   const savedKey = loadApiKey();
   if (savedKey) {
-    const inputEl = document.getElementById('api-key-input');
+    // BUG-7 修正: 'api-key-input' → 'input-api-key'
+    const inputEl = document.getElementById('input-api-key');
     if (inputEl) inputEl.value = savedKey;
   }
 
-  document.getElementById('btn-save-api-key')?.addEventListener('click', () => {
-    const inputEl = document.getElementById('api-key-input');
+  // BUG-8 修正: 'btn-save-api-key' → 'btn-save-api'
+  document.getElementById('btn-save-api')?.addEventListener('click', () => {
+    // BUG-7 修正: 'api-key-input' → 'input-api-key'
+    const inputEl = document.getElementById('input-api-key');
     const key = inputEl ? inputEl.value.trim() : '';
     saveApiKey(key);
     hideErrorBanner();
@@ -393,7 +432,7 @@ document.addEventListener('DOMContentLoaded', () => {
         'info'
       );
     } else if (
-      typeof GeminiAPI !== 'undefined' &&   // ESC-01
+      typeof GeminiAPI !== 'undefined' &&
       !GeminiAPI.loadAdminChain()
     ) {
       showErrorBanner(
@@ -403,8 +442,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  // ── 管理者リンク ──
-  document.getElementById('btn-admin')?.addEventListener('click', () => {
+  // ── 管理者リンク (BUG-9 修正: btn-admin-model) ──
+  // BUG-9 修正: 'btn-admin' → 'btn-admin-model'
+  document.getElementById('btn-admin-model')?.addEventListener('click', () => {
     window.open('admin.html', '_blank');
   });
 
@@ -424,7 +464,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (typeof clearAnswerLines === 'function') clearAnswerLines();
     const problem = AppState.problems[AppState.index];
     if (problem) {
-      if (typeof drawAnswer === 'function') drawAnswer(problem, AppState.level);
+      if (typeof drawAnswer === 'function') drawAnswer(problem);
       _refreshOverlayLimit(problem);
     }
   });
@@ -433,7 +473,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (typeof undoLastLine === 'function') undoLastLine();
     const problem = AppState.problems[AppState.index];
     if (problem) {
-      if (typeof drawAnswer === 'function') drawAnswer(problem, AppState.level);
+      if (typeof drawAnswer === 'function') drawAnswer(problem);
       _refreshOverlayLimit(problem);
     }
   });
@@ -442,7 +482,11 @@ document.addEventListener('DOMContentLoaded', () => {
     checkAnswer();
   });
 
-  document.getElementById('btn-next')?.addEventListener('click', () => {
+  // BUG-6 修正: 'btn-next' → 'btn-next-wrong' と 'btn-next-correct' それぞれに登録
+  document.getElementById('btn-next-wrong')?.addEventListener('click', () => {
+    nextQuestion();
+  });
+  document.getElementById('btn-next-correct')?.addEventListener('click', () => {
     nextQuestion();
   });
 
@@ -459,8 +503,13 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  // ── ホーム ──
+  // ── ホーム（ゲーム内ヘッダー） ──
   document.getElementById('btn-home')?.addEventListener('click', () => {
+    showScreen('start');
+  });
+
+  // BUG-10 修正: 結果画面の「ホームへ」ボタン (btn-result-home) を登録
+  document.getElementById('btn-result-home')?.addEventListener('click', () => {
     showScreen('start');
   });
 
@@ -468,18 +517,17 @@ document.addEventListener('DOMContentLoaded', () => {
   const defaultBtn = document.querySelector('.level-btn[data-level="1"]');
   if (defaultBtn) defaultBtn.click();
 
-  // ──────────────────────────────────────────────
-  // BUG-F1 修正: setTimeout(block①) を削除し、
-  // 以下の即時ブロック(block②) のみで初期バナーを制御
+  // ──────────────────────────────────────────────────────────
+  // BUG-F1 修正済み維持: 即時ブロックのみで初期バナーを制御
   // ESC-01: GeminiAPI 参照を typeof ガードで保護
-  // ──────────────────────────────────────────────
+  // ──────────────────────────────────────────────────────────
   if (!loadApiKey()) {
     showErrorBanner(
       'Gemini APIキーが未設定です。管理者設定からキーを入力してください。',
       'info'
     );
   } else if (
-    typeof GeminiAPI !== 'undefined' &&     // ESC-01
+    typeof GeminiAPI !== 'undefined' &&
     !GeminiAPI.loadAdminChain()
   ) {
     showErrorBanner(
