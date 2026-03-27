@@ -1,11 +1,11 @@
 /**
- * canvas.js  v2.2
- * 変更点 (v2.1R2 → v2.2):
- *   BUG-C: drawWrongFeedback で ctx.scale() 前に
- *          ctx.setTransform(1,0,0,1,0,0) を追加。
- *          canvas.width 再代入でコンテキストはリセットされるが、
- *          防御的に変換行列を明示リセットすることで
- *          スケール累積による描画崩れを完全に防ぐ。
+ * canvas.js  v2.3
+ * 変更点 (v2.2 → v2.3):
+ *   BUG-HEADER: drawModel 内で buildGridHeaders(problem) を呼び出すよう追加。
+ *               旧: syncHeaders のみ呼んでいたため、ヘッダーセル(数字・動物)が
+ *                   一切生成されず未表示だった。
+ *               新: buildGridHeaders でセルをDOM生成してから
+ *                   syncHeaders でサイズを同期する正しい順序に修正。
  */
 
 /* ============================================================
@@ -272,6 +272,8 @@ function drawPreviewLine(ctx, g, fromDot, toPx) {
 
 /* ============================================================
    公開: 見本キャンバス描画
+   ★ BUG-HEADER 修正: buildGridHeaders を呼び出してセルを生成してから
+     syncHeaders でサイズを同期する
    ============================================================ */
 function drawModel(problem) {
   const size   = _resizeCanvasToWrap('canvas-model');
@@ -286,6 +288,9 @@ function drawModel(problem) {
     drawLine(ctx, g, line, MODEL_COLOR, LINE_WIDTH + 1, false);
   }
   drawEndpoints(ctx, g, problem.lines, MODEL_COLOR);
+
+  // ★ BUG-HEADER 修正: DOM セル生成 → サイズ同期の順序で呼ぶ
+  buildGridHeaders(problem);
   syncHeaders(problem);
 }
 
@@ -439,7 +444,7 @@ function clearAnswerLines() {
 }
 
 /* ============================================================
-   公開: 不正解フィードバック描画  ★ BUG-C 修正
+   公開: 不正解フィードバック描画  ★ BUG-C 修正済み
    ============================================================ */
 function drawWrongFeedback(problem, userLines) {
   const canvas  = document.getElementById('canvas-wrong');
@@ -457,8 +462,6 @@ function drawWrongFeedback(problem, userLines) {
   canvas.style.height = W + 'px';
 
   const ctx = canvas.getContext('2d');
-  /* ★ BUG-C修正: canvas.width 再代入でリセットされるが、
-     防御的に変換行列を明示リセットしてからスケールを適用する */
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.scale(dpr, dpr);
 
@@ -492,7 +495,7 @@ function drawWrongFeedback(problem, userLines) {
 function setupResizeObserver() {
   const redraw = () => {
     if (!CanvasState.problem) return;
-    drawModel(CanvasState.problem);
+    drawModel(CanvasState.problem);   // buildGridHeaders も再実行される
     drawAnswer(CanvasState.problem);
   };
 
